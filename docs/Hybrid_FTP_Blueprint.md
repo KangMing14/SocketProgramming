@@ -22,7 +22,7 @@ CLIENT                                   SERVER
   |                                       |
   |------ UDP (data, port negotiated) --->|  per-session UDP socket/port
   |  custom RDT-framed file chunks        |
-  |  <---- ACKs -------------------------- |
+  |  <---- ACKs --------------------------|
 ```
 - **One TCP control socket per client session**, handled by a dedicated thread (or thread-pool worker) holding that client's session state (cwd, logged-in user, transfer type, mode).
 - **One ephemeral UDP socket per active data transfer**, bound either by the server (PASV: server picks a random high port, tells client) or by the client (PORT: client picks a port, tells server, server connects out to it).
