@@ -38,5 +38,7 @@ SocketProgramming/
 ├── docs/
 │   ├── report/                             (technical report .docx)
 │   └── genai_log/                          (per-person GenAI log scratch files)
+├── .gitignore
+├── CMakeLists.txt
 └── README.md
 ```
