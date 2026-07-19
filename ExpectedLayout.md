@@ -1,6 +1,6 @@
 Đây là layout (expected) của dự án, có thể thay đổi tùy vào tình hìn thực tế
 ```
-HybridFTP/
+SocketProgramming/
 ├── server/
 │   ├── src/
 │   │   ├── main.cpp                        [Member A]
