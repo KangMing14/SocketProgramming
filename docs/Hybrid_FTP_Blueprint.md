@@ -196,10 +196,6 @@ Module: (e.g., RDT sliding window sender)
 - What was manually changed, and why
 - Any banned library/pattern caught and removed (e.g., AI initially suggested Boost.Asio — 
   removed, replaced with raw Winsock2 per project rules)
-
-**Verification:** 
-- How the team confirmed correctness after refinement (test run, edge case, code review by 
-  a teammate who didn't write it)
 ```
 
 **Workflow to keep this low-overhead during a 3-week sprint:**
