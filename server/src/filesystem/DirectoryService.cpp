@@ -78,7 +78,18 @@ bool DirectoryService::listDir(const fs::path& currentDir, std::vector<DirEntryI
 }
 
 bool DirectoryService::getMetadata(const fs::path& currentDir, const std::string& target, PathMetadata& out) const {
-	return false;
+	fs::path resolved;
+	if (!resolver.resolve(currentDir, target, resolved)) return false;
+
+	std::error_code ec;
+	out.exists = fs::exists(resolved, ec);
+	if (!out.exists || ec) return false;
+
+	out.isDirectory = fs::is_directory(resolved, ec);
+	out.sizeBytes = out.isDirectory ? 0 : fs::file_size(resolved, ec);
+	out.lastModified = fs::last_write_time(resolved, ec);
+
+	return !ec;
 }
 
 std::string DirectoryService::getFormatPermissions(const fs::path& path) const {
