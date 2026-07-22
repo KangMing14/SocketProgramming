@@ -8,7 +8,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_library(ftp_core STATIC
     server/src/filesystem/PathResolver.cpp
     server/src/filesystem/DirectoryService.cpp
+    server/src/filesystem/ChunkedFileReader.cpp
+    server/src/filesystem/ChunkedFileWriter.cpp
 )
+
 target_include_directories(ftp_core PUBLIC
     server/src
     server/src/filesystem
@@ -38,9 +41,9 @@ add_executable(test_path_safety tests/test_path_safety.cpp)
 target_link_libraries(test_path_safety PRIVATE ftp_core)
 add_test(NAME PathSafety COMMAND test_path_safety)
 
-#add_executable(test_chunking tests/test_chunking.cpp)
-#target_link_libraries(test_chunking PRIVATE ftp_core)
-#add_test(NAME Chunking COMMAND test_chunking)
+add_executable(test_chunking tests/test_chunking.cpp)
+target_link_libraries(test_chunking PRIVATE ftp_core)
+add_test(NAME Chunking COMMAND test_chunking)
 
 #add_executable(test_hashing tests/test_hashing.cpp)
 #target_link_libraries(test_hashing PRIVATE ftp_core)
