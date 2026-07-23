@@ -10,12 +10,13 @@ add_library(ftp_core STATIC
     server/src/filesystem/DirectoryService.cpp
     server/src/filesystem/ChunkedFileReader.cpp
     server/src/filesystem/ChunkedFileWriter.cpp
+    server/src/crypto/Sha256Hasher.cpp
 )
 
 target_include_directories(ftp_core PUBLIC
     server/src
     server/src/filesystem
-    #server/src/crypto
+    server/src/crypto
     #server/src/datachannel
     #server/src/control
     #server/src/rdt
@@ -45,9 +46,9 @@ add_executable(test_chunking tests/test_chunking.cpp)
 target_link_libraries(test_chunking PRIVATE ftp_core)
 add_test(NAME Chunking COMMAND test_chunking)
 
-#add_executable(test_hashing tests/test_hashing.cpp)
-#target_link_libraries(test_hashing PRIVATE ftp_core)
-#add_test(NAME Hashing COMMAND test_hashing)
+add_executable(test_hashing tests/test_hashing.cpp)
+target_link_libraries(test_hashing PRIVATE ftp_core)
+add_test(NAME Hashing COMMAND test_hashing)
 
 #add_executable(test_data_channel tests/test_data_channel.cpp)
 #target_link_libraries(test_data_channel PRIVATE ftp_core)
