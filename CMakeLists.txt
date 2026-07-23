@@ -12,7 +12,7 @@ add_library(ftp_core STATIC
 
 target_include_directories(ftp_core PUBLIC
     server/src
-    server/src/filesystem
+    #server/src/filesystem
     #server/src/crypto
     #server/src/datachannel
     server/src/control
