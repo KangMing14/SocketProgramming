@@ -11,7 +11,7 @@ void test_known_vector_empty_file() {
     std::ofstream("empty_test.bin", std::ios::binary).close();
     std::string hash = Sha256Hasher::hashFile("empty_test.bin");
     assert(hash == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
-    std::cout << "[PASS] known SHA-256 vector (empty file)\n";
+    std::cout << "[PASS] test_known_vector_empty_file\n";
 }
 
 void test_deterministic() {
@@ -19,7 +19,7 @@ void test_deterministic() {
     std::string h1 = Sha256Hasher::hashFile("empty_test.bin");
     std::string h2 = Sha256Hasher::hashFile("empty_test.bin");
     assert(h1 == h2);
-    std::cout << "[PASS] deterministic hashing\n";
+    std::cout << "[PASS] test_deterministic\n";
 }
 
 void test_avalanche_effect() {
@@ -41,14 +41,14 @@ void test_avalanche_effect() {
     for (size_t i = 0; i < hashBefore.size(); i++)
         if (hashBefore[i] != hashAfter[i]) differingChars++;
     assert(differingChars > 20); // a real avalanche affects roughly half the output
-    std::cout << "[PASS] avalanche effect (single-bit change, "
+    std::cout << "[PASS] test_avalanche_effect (single-bit change, "
         << differingChars << "/64 hex chars differ)\n";
 }
 
 void test_nonexistent_file_returns_empty() {
     std::string hash = Sha256Hasher::hashFile("this_file_does_not_exist.bin");
     assert(hash.empty());
-    std::cout << "[PASS] nonexistent file returns empty string\n";
+    std::cout << "[PASS] test_nonexistent_file_returns_empty\n";
 }
 
 int main() {
@@ -56,6 +56,13 @@ int main() {
     test_deterministic();
     test_avalanche_effect();
     test_nonexistent_file_returns_empty();
+
+    // Clean up generated fixture files
+    for (const auto& name : { "empty_test.bin", "avalanche_test.bin",
+                              "this_file_does_not_exist.bin" }) {
+        std::error_code ec;
+        fs::remove(name, ec);
+    }
 
     std::cout << "\n---All Hashing tests passed---\n";
 
