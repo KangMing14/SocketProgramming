@@ -18,7 +18,6 @@ public:
     explicit DirectoryService(const PathResolver& resolver);
 
     struct Result { bool ok; int code; std::string message; };
-    struct PathMetadata { bool exists; bool isDirectory; uintmax_t sizeBytes; fs::file_time_type lastModified; };
 
     Result printWorkingDir(const fs::path& currentDir) const;                                         // PWD
     Result changeDir(fs::path& currentDir, const std::string& target) const;                          // CWD
@@ -26,7 +25,9 @@ public:
     Result makeDir(const fs::path& currentDir, const std::string& name) const;                        // MKD
     Result removeDir(const fs::path& currentDir, const std::string& name) const;                      // RMD
     bool listDir(const fs::path& currentDir, std::vector<DirEntryInfo>& outEntries) const;            // LIST/NLST
-    bool getMetadata(const fs::path& currentDir, const std::string& target, PathMetadata& out) const; // STAT <path>
+
+    struct PathMetadata { bool exists; bool isDirectory; uintmax_t sizeBytes; fs::file_time_type lastModified; };
+    bool getMetadata(const fs::path& currentDir, const std::string& target, PathMetadata& out) const; // STAT w/path, SIZE, MTDM
 
 private:
     const PathResolver& resolver;
