@@ -27,9 +27,6 @@ namespace Sha256Hasher {
 		std::ifstream file(filePath, std::ios::binary);
 		if (!file) return "";
 
-		std::ifstream file(filePath, std::ios::binary);
-		if (!file) return "";
-
 		constexpr size_t CHUNK_SIZE = 1024;
 		std::vector<char> chunk(CHUNK_SIZE);
 		while (file.read(chunk.data(), CHUNK_SIZE) || file.gcount() > 0)
