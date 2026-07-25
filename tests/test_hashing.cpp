@@ -1,13 +1,11 @@
 #include "Sha256Hasher.h"
+
 #include <fstream>
 #include <cassert>
 #include <iostream>
 
 void test_known_vector_empty_file() {
-    // SHA-256 of an empty input is a well-known, publicly documented constant —
-    // this is the single strongest test available: it doesn't just check
-    // "hashing twice gives the same result," it checks your implementation
-    // against the ACTUAL correct SHA-256 algorithm output.
+    // SHA-256 of an empty input is a well-known, publicly documented constant.
     std::ofstream("empty_test.bin", std::ios::binary).close();
     std::string hash = Sha256Hasher::hashFile("empty_test.bin");
     assert(hash == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");

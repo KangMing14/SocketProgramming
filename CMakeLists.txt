@@ -12,6 +12,7 @@ add_library(ftp_core STATIC
     server/src/filesystem/ChunkedFileWriter.cpp
     server/src/crypto/Sha256Hasher.cpp
     server/src/datachannel/DataChannelSession.cpp
+    server/src/datachannel/PassiveModeHandler.cpp
 )
 
 target_include_directories(ftp_core PUBLIC
