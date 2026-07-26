@@ -14,6 +14,8 @@ add_library(ftp_core STATIC
     server/src/datachannel/DataChannelSession.cpp
     server/src/rdt/RdtHeader.cpp
     server/src/rdt/CheckSum.cpp
+    server/src/rdt/RdtSender.cpp
+    server/src/rdt/RdtReceiver.cpp
 )
 
 target_include_directories(ftp_core PUBLIC

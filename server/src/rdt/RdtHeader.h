@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <vector>
 
 #define MAX_PAYLOAD 1000
 
@@ -10,6 +11,14 @@ enum RdtFlags : uint8_t
     FLAG_FIN = 1 << 2,
     FLAG_DATA = 1 << 3,
     FLAG_NAK = 1 << 4
+};
+
+// Member B implements this interface (in rdt/RdtSender.cpp / RdtReceiver.cpp).
+class IRdtTransport {
+public:
+    virtual ~IRdtTransport() = default;
+    virtual bool sendChunk(uint32_t seqNum, const char* data, size_t len) = 0;
+    virtual bool receiveNext(uint32_t& outSeqNum, std::vector<char>& outData, bool& outIsFinal) = 0;
 };
 
 #pragma pack(push, 1)

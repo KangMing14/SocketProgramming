@@ -4,15 +4,7 @@
 #include <vector>
 #include <cstdint>
 #include <winsock2.h>
-
-// Member B implements this interface (in rdt/RdtSender.cpp / RdtReceiver.cpp).
-// Implement the file-side callers to build and unit-test independently until merge.
-class IRdtTransport {
-public:
-    virtual ~IRdtTransport() = default;
-    virtual bool sendChunk(uint32_t seqNum, const char* data, size_t len) = 0;
-    virtual bool receiveNext(uint32_t& outSeqNum, std::vector<char>& outData, bool& outIsFinal) = 0;
-};
+#include "../rdt/RdtHeader.h"
 
 class DataChannelSession {
 public:
