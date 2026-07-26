@@ -1,9 +1,37 @@
 ### GenAI Log Entry #01
+Date: 18/07/2026
+Team member: Do Minh Khang - Member C
+Module: Create PWD related command
+
+**Prompt used:**
+"Create a function for the FTP PWD - Print Working Directory"
+
+**Raw AI output:**
+```cpp
+DirectoryService::Result DirectoryService::printWorkingDir(const std::filesystem::path& currentDir) const {
+	auto relative = fs::relative(currentDir, resolver.root());
+	std::string display = "/" + relative.generic_string();
+	if (display == "/.") display = "/";
+
+	return { true, 257, display + " is the current directory" };
+}
+```
+
+**Critical refinement performed:**
+- AI seperate the fuction into 2 smaller functions. We merge them into one because the fuction only called once at `LIST` command
+- AI using too many `else if` for checking file type. Take advance of the `file_status`, we switch from `if else` to `switch(status.type())`
+
+**Verification:** 
+- How the team confirmed correctness after refinement (test run, edge case, code review by 
+  a teammate who didn't write it)
+
+
+### GenAI Log Entry #02
 Date: 19/07/2026
 Team member: Do Minh Khang - Member C
 Module: Get permissions string for LIST
 
-**Prompt used (verbatim):**
+**Prompt used:**
 "How to change std::filesystem::status().permissions() to Unix ls -l long-format listing for FTP LIST"
 
 **Raw AI output (verbatim, or summarized with a note if long):**
@@ -52,10 +80,7 @@ std::string get_ftp_list_format(const fs::path& path) {
 }
 ```
 
-**Critical refinement performed:**
+**Refinement performed:**
 - AI seperate the fuction into 2 smaller functions. We merge them into one because the fuction only called once at `LIST` command
 - AI using too many `else if` for checking file type. Take advance of the `file_status`, we switch from `if else` to `switch(status.type())`
 
-**Verification:** 
-- How the team confirmed correctness after refinement (test run, edge case, code review by 
-  a teammate who didn't write it)

@@ -13,6 +13,7 @@ add_library(ftp_core STATIC
     server/src/crypto/Sha256Hasher.cpp
     server/src/datachannel/DataChannelSession.cpp
     server/src/datachannel/PassiveModeHandler.cpp
+    server/src/datachannel/ActiveModeHandler.cpp
 )
 
 target_include_directories(ftp_core PUBLIC

@@ -1,7 +1,7 @@
 #include "DataChannelSession.h"
 
-#include "../filesystem/ChunkedFileReader.h"
-#include "../filesystem/ChunkedFileWriter.h"
+#include "ChunkedFileReader.h"
+#include "ChunkedFileWriter.h"
 
 DataChannelSession::DataChannelSession(SOCKET dataSocket, sockaddr_in peerAddr, IRdtTransport& transport)
     : dataSocket(dataSocket), peerAddr(peerAddr), transport(transport) {}
