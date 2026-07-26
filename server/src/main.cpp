@@ -1,6 +1,6 @@
 #include "control/Session.h"
 
 int main(){
-    runSession();
+    Session::runSession();
     return 0;
 }

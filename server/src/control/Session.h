@@ -11,7 +11,9 @@
 #include <string>
 #include <thread>
 
-void replyWithCode(SOCKET, int);
-SOCKET initializeSession();
-void handleClient(SOCKET);
-void runSession();
+namespace Session {
+    void replyWithCode(SOCKET, int, std::string);
+    SOCKET initializeSession();
+    void handleClient(SOCKET);
+    void runSession();
+}
