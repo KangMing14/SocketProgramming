@@ -16,6 +16,8 @@ add_library(ftp_core STATIC
     server/src/rdt/CheckSum.cpp
     server/src/rdt/RdtSender.cpp
     server/src/rdt/RdtReceiver.cpp
+    server/src/datachannel/PassiveModeHandler.cpp
+    server/src/datachannel/ActiveModeHandler.cpp
 )
 
 target_include_directories(ftp_core PUBLIC
