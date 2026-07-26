@@ -92,6 +92,45 @@ bool DirectoryService::getMetadata(const fs::path& currentDir, const std::string
 	return !ec;
 }
 
+DirectoryService::Result DirectoryService::deleteFile(const fs::path& currentDir, const std::string& name) const {
+	PathMetadata meta;
+	if (!getMetadata(currentDir, name, meta))
+		return { false, ReplyCode::ActionNotTaken, "Requested action not taken: file not found" };
+	if (meta.isDirectory)
+		return { false, ReplyCode::ActionNotTaken, "Requested action not taken: cannot DELE a directory; use RMD" };
+
+	std::filesystem::path resolved;
+	resolver.resolve(currentDir, name, resolved);
+
+	std::error_code ec;
+	if (!std::filesystem::remove(resolved, ec) || ec)
+		return { false, ReplyCode::ActionNotTaken, "Requested action not taken: could not delete file" };
+
+	return { true, ReplyCode::ActionCompleted, "File deleted" };
+}
+
+DirectoryService::Result DirectoryService::renameFrom(const fs::path& currentDir, const std::string& oldName, fs::path& outPendingRenameSource) const {
+	PathMetadata meta;
+	if (!getMetadata(currentDir, oldName, meta))
+		return { false, ReplyCode::ActionNotTaken, "Requested action not taken: file not found" };
+
+	resolver.resolve(currentDir, oldName, outPendingRenameSource);
+	return { true, ReplyCode::PendingRNTO, "Requested file action pending further information (RNTO)" };
+}
+
+DirectoryService::Result DirectoryService::renameTo(const fs::path& currentDir, const fs::path& pendingRenameSource, const std::string& newName) const {
+	std::filesystem::path resolvedDest;
+	if (!resolver.resolve(currentDir, newName, resolvedDest))
+		return { false, ReplyCode::ActionNotTaken, "Requested action not taken: destination path outside server root" };
+
+	std::error_code ec;
+	std::filesystem::rename(pendingRenameSource, resolvedDest, ec);
+	if (ec)
+		return { false, ReplyCode::ActionNotTaken, "Requested action not taken: rename failed." };
+
+	return { true, ReplyCode::ActionCompleted, "Rename successful" };
+}
+
 std::string DirectoryService::getFormatPermissions(const fs::path& path) const {
 	std::error_code ec;
 	fs::file_status status = fs::status(path, ec);

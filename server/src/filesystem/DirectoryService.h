@@ -29,6 +29,12 @@ public:
     struct PathMetadata { bool exists; bool isDirectory; uintmax_t sizeBytes; fs::file_time_type lastModified; };
     bool getMetadata(const fs::path& currentDir, const std::string& target, PathMetadata& out) const; // STAT w/path, SIZE, MTDM
 
+    Result deleteFile(const fs::path& currentDir, const std::string& name) const;                     // DELE
+    Result renameFrom(const fs::path& currentDir, const std::string& oldName,                         // RNFR
+        fs::path& outPendingRenameSource) const;
+    Result renameTo(const fs::path& currentDir, const fs::path& pendingRenameSource,                  // RNTO
+        const std::string& newName) const;
+
 private:
     const PathResolver& resolver;
 
