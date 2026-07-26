@@ -12,6 +12,10 @@ add_library(ftp_core STATIC
     server/src/filesystem/ChunkedFileWriter.cpp
     server/src/crypto/Sha256Hasher.cpp
     server/src/datachannel/DataChannelSession.cpp
+    server/src/rdt/RdtHeader.cpp
+    server/src/rdt/CheckSum.cpp
+    server/src/rdt/RdtSender.cpp
+    server/src/rdt/RdtReceiver.cpp
     server/src/datachannel/PassiveModeHandler.cpp
     server/src/datachannel/ActiveModeHandler.cpp
 )
@@ -22,7 +26,7 @@ target_include_directories(ftp_core PUBLIC
     server/src/crypto
     server/src/datachannel
     #server/src/control
-    #server/src/rdt
+    server/src/rdt
     server/src/common
 )
 
@@ -56,3 +60,7 @@ add_test(NAME Hashing COMMAND test_hashing)
 add_executable(test_data_channel tests/test_data_channel.cpp)
 target_link_libraries(test_data_channel PRIVATE ftp_core)
 add_test(NAME DataChannel COMMAND test_data_channel)
+
+add_executable(test_rdt tests/test_rdt.cpp)
+target_link_libraries(test_rdt PRIVATE ftp_core ws2_32)
+add_test(NAME RdtTest COMMAND test_rdt)
