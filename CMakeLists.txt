@@ -12,6 +12,9 @@ add_library(ftp_core STATIC
     server/src/filesystem/ChunkedFileWriter.cpp
     server/src/crypto/Sha256Hasher.cpp
     server/src/datachannel/DataChannelSession.cpp
+    server/src/control/CommandDispatcher.cpp
+    server/src/control/CommandParser.cpp
+    server/src/control/Session.cpp
     server/src/rdt/RdtHeader.cpp
     server/src/rdt/CheckSum.cpp
     server/src/rdt/RdtSender.cpp
@@ -25,7 +28,7 @@ target_include_directories(ftp_core PUBLIC
     server/src/filesystem
     server/src/crypto
     server/src/datachannel
-    #server/src/control
+    server/src/control
     server/src/rdt
     server/src/common
 )
