@@ -81,7 +81,8 @@ void RdtReceiver::sendAck(uint32_t ack_num, sockaddr_in &clientAddr) {
 //   1. Always check checksum first — drop silently if bad
 //   2. Always send ACK even for duplicates — but tell the caller it's a
 //   duplicate
-bool RdtReceiver::receiveNext(uint32_t& outSeqNum, std::vector<char>& outData, bool& outIsFinal) {
+bool RdtReceiver::receiveNext(uint32_t &outSeqNum, std::vector<char> &outData,
+                              bool &outIsFinal) {
   char recvBuf[HEADER_SIZE + MAX_PAYLOAD];
   sockaddr_in clientAddr{};
   int clientLen = sizeof(clientAddr);
@@ -142,9 +143,10 @@ bool RdtReceiver::receiveNext(uint32_t& outSeqNum, std::vector<char>& outData, b
     uint16_t payload_len = header.payload_len;
     if (payload_len > MAX_PAYLOAD)
       payload_len = MAX_PAYLOAD;
-    
+
     outData.resize(payload_len);
     memcpy(outData.data(), recvBuf + HEADER_SIZE, payload_len);
+
     outSeqNum = header.seq_num;
     outIsFinal = (header.flags & FLAG_FIN) != 0;
 
@@ -157,7 +159,7 @@ bool RdtReceiver::receiveNext(uint32_t& outSeqNum, std::vector<char>& outData, b
   }
 }
 
-bool RdtReceiver::sendChunk(uint32_t seqNum, const char* data, size_t len) {
-    // RdtReceiver does not send data chunks.
-    return false;
+bool RdtReceiver::sendChunk(uint32_t seqNum, const char *data, size_t len) {
+  // RdtReceiver does not send data chunks.
+  return false;
 }
