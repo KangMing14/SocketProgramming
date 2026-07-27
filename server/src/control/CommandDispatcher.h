@@ -9,6 +9,6 @@
 #include <vector>
 
 namespace CommandDispatcher{
-    void executeCommand(SOCKET&, const ParsedCommand);
-    void quitSession(SOCKET&, const std::vector<std::string>&);
+    void executeCommand(ClientSession&, const ParsedCommand);
+    void quitSession(ClientSession&, const std::vector<std::string>&);
 }

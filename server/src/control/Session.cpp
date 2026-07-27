@@ -2,6 +2,7 @@
 #include "../common/ReplyCodes.h"
 #include "CommandParser.h"
 #include "CommandDispatcher.h"
+#include "Globals.h"
 #include <winsock2.h>
 
 namespace Session {
@@ -40,7 +41,11 @@ namespace Session {
     }
 
     void handleClient(SOCKET clientSock){
-        replyWithCode(clientSock, ReplyCode::ServiceReady);
+        ClientSession session;
+        session.socket = clientSock;
+        session.currentDir = g_pathResolver.root();
+
+        replyWithCode(clientSock, ReplyCode::ServiceReady, "Service ready.");
 
         std::string inBuffer;
         char buffer[512];
@@ -60,9 +65,9 @@ namespace Session {
                 }
 
                 // Command processing
-                ParsedCommand cmd = CommandParser::parseCommand(inBuffer);
+                ParsedCommand cmd = CommandParser::parseCommand(command);
                 if (cmd.type.empty()) replyWithCode(clientSock, ReplyCode::SyntaxError);
-                else CommandDispatcher::executeCommand(clientSock, cmd);
+                else CommandDispatcher::executeCommand(session, cmd);
 
                 // Remove the processed command from the session buffer
                 inBuffer.erase(0, newlinePos + 1);

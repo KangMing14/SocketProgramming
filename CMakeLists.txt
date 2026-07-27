@@ -39,8 +39,8 @@ if(WIN32)
 endif()
 
 # ---- Server executable ----
-#add_executable(ftp_server server/src/main.cpp)
-#target_link_libraries(ftp_server PRIVATE ftp_core)
+add_executable(ftp_server server/src/main.cpp)
+target_link_libraries(ftp_server PRIVATE ftp_core)
 
 # ---- Client executable ----
 #add_executable(ftp_client client/src/main.cpp)
