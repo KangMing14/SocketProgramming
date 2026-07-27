@@ -1,6 +1,6 @@
 #include "DirectoryService.h"
 
-#include " ReplyCodes.h"
+#include "ReplyCodes.h"
 
 DirectoryService::DirectoryService(const PathResolver& resolver) : resolver(resolver) {}
 
@@ -9,15 +9,15 @@ DirectoryService::Result DirectoryService::printWorkingDir(const std::filesystem
 	std::string display = "/" + relative.generic_string();
 	if (display == "/.") display = "/";
 
-	return { true, ReplyCode::PathnameCreated, "\"" + display + "\" is the current directory" };
+	return { true, ReplyCode::PathnameCreated, "\"" + display + "\" is the current directory." };
 }
 
 DirectoryService::Result DirectoryService::changeDir(fs::path& currentDir, const std::string& target) const {
 	fs::path resolved;
 	if (!resolver.resolve(currentDir, target, resolved))
-		return { false, ReplyCode::ActionNotTaken, "Requested action not taken: path outside server root" };
+		return { false, ReplyCode::ActionNotTaken, "Path outside server root." };
 	if(!fs::exists(resolved) || !fs::is_directory(resolved))
-		return { false, ReplyCode::ActionNotTaken, "Requested action not taken: no a directory" };
+		return { false, ReplyCode::ActionNotTaken, "Not a directory." };
 
 	currentDir = resolved;
 	return { true, ReplyCode::ActionCompleted, "Directory changed to " + resolved.filename().string() };
@@ -26,7 +26,7 @@ DirectoryService::Result DirectoryService::changeDir(fs::path& currentDir, const
 DirectoryService::Result DirectoryService::changeToParent(fs::path& currentDir) const {
 	fs::path resolved;
 	if (!resolver.resolve(currentDir, "..", resolved))
-		return { false, ReplyCode::ActionNotTaken, "Requested action not taken: already at server root" };
+		return { false, ReplyCode::ActionNotTaken, "Already at server root." };
 
 	currentDir = resolved;
 	return { true, ReplyCode::ActionCompleted, "Directory changed to " + resolved.filename().string() };
@@ -35,13 +35,13 @@ DirectoryService::Result DirectoryService::changeToParent(fs::path& currentDir) 
 DirectoryService::Result DirectoryService::makeDir(const fs::path& currentDir, const std::string& name) const {
 	fs::path resolved;
 	if(!resolver.resolve(currentDir, name, resolved))
-		return { false, ReplyCode::ActionNotTaken, "Requested action not taken: path outside server root" };
+		return { false, ReplyCode::ActionNotTaken, "Path outside server root." };
 	if(fs::exists(resolved))
-		return { false, ReplyCode::ActionNotTaken, "Requested action not taken: already exists" };
+		return { false, ReplyCode::ActionNotTaken, "Already exists." };
 
 	std::error_code ec;
 	if(!fs::create_directories(resolved, ec) || ec)
-		return { false, ReplyCode::ActionNotTaken, "Requested action not taken: could not create directory" };
+		return { false, ReplyCode::ActionNotTaken, "Could not create directory." };
 
 	return { true, ReplyCode::PathnameCreated, "\"" + resolved.filename().string() + "\" created" };
 }
@@ -49,15 +49,15 @@ DirectoryService::Result DirectoryService::makeDir(const fs::path& currentDir, c
 DirectoryService::Result DirectoryService::removeDir(const fs::path& currentDir, const std::string& name) const {
 	fs::path resolved;
 	if (!resolver.resolve(currentDir, name, resolved))
-		return { false, ReplyCode::ActionNotTaken, "Requested action not taken: path outside server root" };
+		return { false, ReplyCode::ActionNotTaken, "Path outside server root." };
 	if (!fs::exists(resolved) || !fs::is_directory(resolved))
-		return { false, ReplyCode::ActionNotTaken, "Requested action not taken: not a directory" };
+		return { false, ReplyCode::ActionNotTaken, "Not a directory" };
 	if(resolved == resolver.root())
-		return { false, ReplyCode::ActionNotTaken, "Requested action not taken: cannot remove server root" };
+		return { false, ReplyCode::ActionNotTaken, "Cannot remove server root" };
 
 	std::error_code ec;
 	if (!fs::remove(resolved, ec) || ec)
-		return { false, ReplyCode::ActionNotTaken, "Requested action not taken: directory not empty or in use" };
+		return { false, ReplyCode::ActionNotTaken, "Directory not empty or in use" };
 
 	return { true, ReplyCode::ActionCompleted, "Directory removed" };
 }
@@ -95,16 +95,16 @@ bool DirectoryService::getMetadata(const fs::path& currentDir, const std::string
 DirectoryService::Result DirectoryService::deleteFile(const fs::path& currentDir, const std::string& name) const {
 	PathMetadata meta;
 	if (!getMetadata(currentDir, name, meta))
-		return { false, ReplyCode::ActionNotTaken, "Requested action not taken: file not found" };
+		return { false, ReplyCode::ActionNotTaken, "File not found" };
 	if (meta.isDirectory)
-		return { false, ReplyCode::ActionNotTaken, "Requested action not taken: cannot DELE a directory; use RMD" };
+		return { false, ReplyCode::ActionNotTaken, "RCannot DELE a directory; use RMD" };
 
 	std::filesystem::path resolved;
 	resolver.resolve(currentDir, name, resolved);
 
 	std::error_code ec;
 	if (!std::filesystem::remove(resolved, ec) || ec)
-		return { false, ReplyCode::ActionNotTaken, "Requested action not taken: could not delete file" };
+		return { false, ReplyCode::ActionNotTaken, "Could not delete file" };
 
 	return { true, ReplyCode::ActionCompleted, "File deleted" };
 }
@@ -112,7 +112,7 @@ DirectoryService::Result DirectoryService::deleteFile(const fs::path& currentDir
 DirectoryService::Result DirectoryService::renameFrom(const fs::path& currentDir, const std::string& oldName, fs::path& outPendingRenameSource) const {
 	PathMetadata meta;
 	if (!getMetadata(currentDir, oldName, meta))
-		return { false, ReplyCode::ActionNotTaken, "Requested action not taken: file not found" };
+		return { false, ReplyCode::ActionNotTaken, "File not found" };
 
 	resolver.resolve(currentDir, oldName, outPendingRenameSource);
 	return { true, ReplyCode::PendingRNTO, "Requested file action pending further information (RNTO)" };
@@ -121,12 +121,12 @@ DirectoryService::Result DirectoryService::renameFrom(const fs::path& currentDir
 DirectoryService::Result DirectoryService::renameTo(const fs::path& currentDir, const fs::path& pendingRenameSource, const std::string& newName) const {
 	std::filesystem::path resolvedDest;
 	if (!resolver.resolve(currentDir, newName, resolvedDest))
-		return { false, ReplyCode::ActionNotTaken, "Requested action not taken: destination path outside server root" };
+		return { false, ReplyCode::ActionNotTaken, "Destination path outside server root" };
 
 	std::error_code ec;
 	std::filesystem::rename(pendingRenameSource, resolvedDest, ec);
 	if (ec)
-		return { false, ReplyCode::ActionNotTaken, "Requested action not taken: rename failed." };
+		return { false, ReplyCode::ActionNotTaken, "Rename failed." };
 
 	return { true, ReplyCode::ActionCompleted, "Rename successful" };
 }

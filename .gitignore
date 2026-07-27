@@ -1,3 +1,7 @@
+*.exe
+*.ilk
+*.obj
+*.pdb
 .cache/
 .vs/
 .vscode/
