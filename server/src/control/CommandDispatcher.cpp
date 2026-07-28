@@ -158,7 +158,7 @@ namespace CommandDispatcher{
             Session::replyWithCode(s.socket, ReplyCode::ActionCompleted, "PORT command successful.");
         } },
 
-        /*{"RETR", [](ClientSession& s, const std::vector<std::string>& args) {
+        {"RETR", [](ClientSession& s, const std::vector<std::string>& args) {
             if (args.empty()) { Session::replyWithCode(s.socket, ReplyCode::SyntaxError, ""); return; }
             std::filesystem::path resolved;
             if (!g_pathResolver.resolve(s.currentDir, args[0], resolved) || !std::filesystem::exists(resolved)) {
@@ -179,22 +179,22 @@ namespace CommandDispatcher{
                                     ok ? "Transfer complete." : "Transfer failed.");
         } },
 
-        { "STOR", [](ClientSession& s, const std::vector<std::string>& args) {
-            if (args.empty()) { Session::replyWithCode(s.socket, ReplyCode::SyntaxError, ""); return; }
-            std::filesystem::path resolved;
-            if (!g_pathResolver.resolve(s.currentDir, args[0], resolved)) {
-                Session::replyWithCode(s.socket, ReplyCode::ActionNotTaken, "Path outside server root.");
-                return;
-            }
+        //{ "STOR", [](ClientSession& s, const std::vector<std::string>& args) {
+        //    if (args.empty()) { Session::replyWithCode(s.socket, ReplyCode::SyntaxError, ""); return; }
+        //    std::filesystem::path resolved;
+        //    if (!g_pathResolver.resolve(s.currentDir, args[0], resolved)) {
+        //        Session::replyWithCode(s.socket, ReplyCode::ActionNotTaken, "Path outside server root.");
+        //        return;
+        //    }
 
-            RdtReceiver transport( <the port this session's PASV/PORT actually bound> );
-            DataChannelSession channel(s.pendingDataSocket, s.pendingPeerAddr, transport);
+        //    RdtReceiver transport( /*the port this session's PASV/PORT actually bound*/ );
+        //    DataChannelSession channel(s.pendingDataSocket, s.pendingPeerAddr, transport);
 
-            Session::replyWithCode(s.socket, ReplyCode::FileStatusOkay, "Opening data connection.");
-            bool ok = channel.receiveFile(resolved);
-            Session::replyWithCode(s.socket, ok ? ReplyCode::TransferComplete : ReplyCode::ActionNotTaken,
-                                    ok ? "Transfer complete." : "Transfer failed.");
-        } },*/
+        //    Session::replyWithCode(s.socket, ReplyCode::FileStatusOkay, "Opening data connection.");
+        //    bool ok = channel.receiveFile(resolved);
+        //    Session::replyWithCode(s.socket, ok ? ReplyCode::TransferComplete : ReplyCode::ActionNotTaken,
+        //                            ok ? "Transfer complete." : "Transfer failed.");
+        //} },
 
         { "HASH", [](ClientSession& s, const std::vector<std::string>& args) {
             std::filesystem::path resolved;
@@ -215,7 +215,7 @@ namespace CommandDispatcher{
                 Session::replyWithCode(s.socket, ReplyCode::SyntaxError, "TYPE must be A or I.");
                 return;
             }
-            s.transferModeBinary = (args[0] == "I");
+            s.transferMode = (args[0] == "A") ? TransferMode::ASCII : TransferMode::Binary;
             Session::replyWithCode(s.socket, ReplyCode::ActionCompleted, "Type set to " + args[0] + ".");
         } },
     };

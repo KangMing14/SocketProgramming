@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <cstdint>
 #include <vector>
+#include <functional>
 
 namespace fs = std::filesystem;
 
@@ -16,7 +17,8 @@ public:
     bool isValid() const;
 
     void addChunk(uint32_t seqNum, const std::vector<char>& data);
-    bool finalize(uint32_t expectedChunkCount);
+    bool finalize(uint32_t expectedChunkCount, 
+                    const std::function<std::vector<char>(const std::vector<char>&)>& transform = nullptr);
 
 private:
     fs::path filePath;

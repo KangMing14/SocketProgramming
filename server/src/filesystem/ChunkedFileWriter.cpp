@@ -6,7 +6,8 @@ bool ChunkedFileWriter::isValid() const { return !filePath.empty(); }
 
 void ChunkedFileWriter::addChunk(uint32_t seqNum, const std::vector<char>& data) { pendingChunks[seqNum] = data; };
 
-bool ChunkedFileWriter::finalize(uint32_t expectedChunkCount) {
+bool ChunkedFileWriter::finalize(uint32_t expectedChunkCount,
+                                    const std::function<std::vector<char>(const std::vector<char>&)>& transform) {
     if (pendingChunks.size() != expectedChunkCount) return false;
 
     std::ofstream out(filePath, std::ios::binary);
@@ -16,7 +17,13 @@ bool ChunkedFileWriter::finalize(uint32_t expectedChunkCount) {
         auto it = pendingChunks.find(i);
         if (it == pendingChunks.end()) return false;
 
-        out.write(it->second.data(), it->second.size());
+        if (transform) {
+            std::vector<char> transformed = transform(it->second);
+            out.write(transformed.data(), transformed.size());
+        }
+        else {
+            out.write(it->second.data(), it->second.size());
+        }
     }
 
     return true;
