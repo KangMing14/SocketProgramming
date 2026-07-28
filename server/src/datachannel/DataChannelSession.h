@@ -4,14 +4,17 @@
 #include <vector>
 #include <cstdint>
 #include <winsock2.h>
-#include "../rdt/RdtHeader.h"
+#include "RdtHeader.h"
+#include "TransferMode.h"
+
+namespace fs = std::filesystem;
 
 class DataChannelSession {
 public:
     DataChannelSession(SOCKET dataSocket, sockaddr_in peerAddr, IRdtTransport& transport);
 
-    bool sendFile(const std::filesystem::path& filePath);
-    bool receiveFile(const std::filesystem::path& destPath);
+    bool sendFile(const fs::path& filePath, TransferMode mode = TransferMode::Binary);
+    bool receiveFile(const fs::path& destPath, TransferMode mode = TransferMode::Binary);
 
 private:
     // Already-opened UDP socket and the remote peer's address for this

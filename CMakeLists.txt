@@ -10,6 +10,8 @@ add_library(ftp_core STATIC
     server/src/filesystem/DirectoryService.cpp
     server/src/filesystem/ChunkedFileReader.cpp
     server/src/filesystem/ChunkedFileWriter.cpp
+    server/src/filesystem/AsciiTranslator.cpp
+    server/src/filesystem/AsciiChunkedReader.cpp
     server/src/crypto/Sha256Hasher.cpp
     server/src/datachannel/DataChannelSession.cpp
     server/src/control/CommandDispatcher.cpp
@@ -63,6 +65,10 @@ add_test(NAME Hashing COMMAND test_hashing)
 add_executable(test_data_channel tests/test_data_channel.cpp)
 target_link_libraries(test_data_channel PRIVATE ftp_core)
 add_test(NAME DataChannel COMMAND test_data_channel)
+
+add_executable(test_ascii_translator tests/test_ascii_translator.cpp)
+target_link_libraries(test_ascii_translator PRIVATE ftp_core ws2_32)
+add_test(NAME ASCIITest COMMAND test_ascii_translator)
 
 add_executable(test_rdt tests/test_rdt.cpp)
 target_link_libraries(test_rdt PRIVATE ftp_core ws2_32)

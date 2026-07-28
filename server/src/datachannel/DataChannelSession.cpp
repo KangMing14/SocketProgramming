@@ -2,28 +2,36 @@
 
 #include "ChunkedFileReader.h"
 #include "ChunkedFileWriter.h"
+#include "AsciiChunkedReader.h"
+
 
 DataChannelSession::DataChannelSession(SOCKET dataSocket, sockaddr_in peerAddr, IRdtTransport& transport)
     : dataSocket(dataSocket), peerAddr(peerAddr), transport(transport) {}
 
-bool DataChannelSession::sendFile(const std::filesystem::path& filePath) {
-    ChunkedFileReader reader(filePath);
-    if (!reader.isOpen()) return false;
-
+bool DataChannelSession::sendFile(const std::filesystem::path& filePath, TransferMode mode) {
     std::vector<char> chunk;
     uint32_t seq = 0;
-    while (reader.nextChunk(chunk)) {
-        if (!transport.sendChunk(seq, chunk.data(), chunk.size())) {
-            return false; // B's retry logic lives inside sendChunk — a false here
-                          // means either transport gave up entirely or still retrying
-                          // internally. Shall change based on member B's implementation.
+
+    if (mode == TransferMode::Binary) {
+        ChunkedFileReader reader(filePath);
+        if (!reader.isOpen()) return false;
+        while (reader.nextChunk(chunk)) {
+            if (!transport.sendChunk(seq, chunk.data(), chunk.size())) return false;
+            seq++;
         }
-        seq++;
+    }
+    else {
+        AsciiChunkedReader reader(filePath);
+        if (!reader.isOpen()) return false;
+        while (reader.nextChunk(chunk)) {
+            if (!transport.sendChunk(seq, chunk.data(), chunk.size())) return false;
+            seq++;
+        }
     }
     return true;
 }
 
-bool DataChannelSession::receiveFile(const std::filesystem::path& destPath) {
+bool DataChannelSession::receiveFile(const std::filesystem::path& destPath, TransferMode mode) {
     ChunkedFileWriter writer(destPath);
 
     uint32_t seq = 0, chunkCount = 0;
@@ -32,12 +40,16 @@ bool DataChannelSession::receiveFile(const std::filesystem::path& destPath) {
 
     while (transport.receiveNext(seq, data, isFinal)) {
         writer.addChunk(seq, data);
-        chunkCount++;       // Assumes receiveNext is called (and returns true) exactly
-                            // once per unique chunk. Member B's receiveNext implementation 
-                            // might return true many times, need change if really is.
+        chunkCount++;
 
-        if (isFinal) break; // Also based on how member B's flagged the final chunk
+        if (isFinal) break;
     }
 
-    return writer.finalize(chunkCount);
+    if (mode == TransferMode::Binary) {
+        return writer.finalize(chunkCount);
+    }
+    else {
+        AsciiTranslator translator;
+        return writer.finalize(chunkCount, [&translator](const std::vector<char>& raw) { return translator.decode(raw); });
+    }
 }

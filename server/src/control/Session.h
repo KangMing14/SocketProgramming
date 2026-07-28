@@ -11,11 +11,12 @@
 #include <string>
 #include <thread>
 #include <filesystem>
+#include "TransferMode.h"
 
 struct ClientSession {
     SOCKET socket;
     bool authenticated = false;
-    bool transferModeBinary = false;
+    TransferMode transferMode = TransferMode::Binary;
     std::string username;
     std::filesystem::path currentDir;
 
