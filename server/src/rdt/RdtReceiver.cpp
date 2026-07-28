@@ -102,6 +102,11 @@ bool RdtReceiver::receiveNext(uint32_t &outSeqNum, std::vector<char> &outData,
       return false;
     }
 
+    if (n < HEADER_SIZE) {
+      std::cerr << "[Receiver] Packet too small, ignoring." << std::endl;
+      continue;
+    }
+
     // --- GOLDEN RULE #1: Verify checksum FIRST ---
     // We verify by computing the checksum over the RAW received bytes.
     // We need to zero the checksum field in the buffer first for this to work.
@@ -143,6 +148,10 @@ bool RdtReceiver::receiveNext(uint32_t &outSeqNum, std::vector<char> &outData,
     uint16_t payload_len = header.payload_len;
     if (payload_len > MAX_PAYLOAD)
       payload_len = MAX_PAYLOAD;
+
+    int actual_payload = n - HEADER_SIZE;
+    if (payload_len > actual_payload)
+      payload_len = actual_payload;
 
     outData.resize(payload_len);
     memcpy(outData.data(), recvBuf + HEADER_SIZE, payload_len);

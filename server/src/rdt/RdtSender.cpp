@@ -75,48 +75,73 @@ void RdtSender::sendRawPacket(const RdtPacket &packet)
 // Returns true if a matching ACK arrived, false if timeout or wrong ACK
 bool RdtSender::waitForAck(uint32_t expected_ack_num)
 {
-  char recvBuf[HEADER_SIZE + MAX_PAYLOAD];
-  sockaddr_in fromAddr{};
-  int fromLen = sizeof(fromAddr);
-
-  // recvfrom() blocks here until a packet arrives OR the SO_RCVTIMEO timeout
-  // fires
-  int n = recvfrom(udpSocket, recvBuf, sizeof(recvBuf), 0,
-                   (sockaddr *)&fromAddr, &fromLen);
-
-  if (n == SOCKET_ERROR)
+  while (true)
   {
-    int err = WSAGetLastError();
-    if (err == WSAETIMEDOUT)
+    char recvBuf[HEADER_SIZE + MAX_PAYLOAD];
+    sockaddr_in fromAddr{};
+    int fromLen = sizeof(fromAddr);
+
+    // recvfrom() blocks here until a packet arrives OR the SO_RCVTIMEO timeout
+    // fires
+    int n = recvfrom(udpSocket, recvBuf, sizeof(recvBuf), 0,
+                     (sockaddr *)&fromAddr, &fromLen);
+
+    if (n == SOCKET_ERROR)
     {
-      std::cerr << "[Sender] Timeout waiting for ACK " << expected_ack_num
-                << " — will retransmit." << std::endl;
+      int err = WSAGetLastError();
+      if (err == WSAETIMEDOUT)
+      {
+        std::cerr << "[Sender] Timeout waiting for ACK " << expected_ack_num
+                  << " — will retransmit." << std::endl;
+      }
+      return false; // Real timeout, return false so sendChunk will retransmit
     }
-    return false;
+
+    if (n < HEADER_SIZE)
+    {
+      std::cerr << "[Sender] Packet too small, ignoring." << std::endl;
+      continue;
+    }
+
+    // Verify Checksum
+    char checksumBuf[HEADER_SIZE + MAX_PAYLOAD];
+    memcpy(checksumBuf, recvBuf, n);
+    checksumBuf[13] = 0;
+    checksumBuf[14] = 0;
+
+    uint16_t computed = internetChecksum((const uint8_t *)checksumBuf, n);
+    uint16_t received_checksum;
+    memcpy(&received_checksum, recvBuf + 13, 2);
+    received_checksum = ntohs(received_checksum);
+
+    if (computed != received_checksum)
+    {
+      std::cerr << "[Sender] Checksum MISMATCH on ACK, ignoring." << std::endl;
+      continue;
+    }
+
+    // Deserialize the received bytes back into a header struct
+    RdtHeader ackHeader = deserializeHeader(recvBuf);
+
+    // Golden Rule: Verify this is actually a proper ACK with FLAG_ACK set
+    if (!(ackHeader.flags & FLAG_ACK))
+    {
+      std::cerr << "[Sender] Received packet is not an ACK, ignoring."
+                << std::endl;
+      continue;
+    }
+
+    // Check if the ACK matches what we were waiting for
+    if (ackHeader.ack_num == expected_ack_num)
+    {
+      return true; // Success!
+    }
+
+    // We got an ACK, but for the wrong packet (stale ACK from a previous
+    // retransmit)
+    std::cerr << "[Sender] Stale ACK received (got " << ackHeader.ack_num
+              << " expected " << expected_ack_num << "), ignoring." << std::endl;
   }
-
-  // Deserialize the received bytes back into a header struct
-  RdtHeader ackHeader = deserializeHeader(recvBuf);
-
-  // Golden Rule: Verify this is actually a proper ACK with FLAG_ACK set
-  if (!(ackHeader.flags & FLAG_ACK))
-  {
-    std::cerr << "[Sender] Received packet is not an ACK, ignoring."
-              << std::endl;
-    return false;
-  }
-
-  // Check if the ACK matches what we were waiting for
-  if (ackHeader.ack_num == expected_ack_num)
-  {
-    return true; //
-  }
-
-  // We got an ACK, but for the wrong packet (stale ACK from a previous
-  // retransmit)
-  std::cerr << "[Sender] Stale ACK received (got " << ackHeader.ack_num
-            << " expected " << expected_ack_num << "), ignoring." << std::endl;
-  return false;
 }
 
 // PUBLIC: High-level Stop-and-Wait send
