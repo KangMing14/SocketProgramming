@@ -2,7 +2,7 @@
 #include <cstdint>
 #include <vector>
 
-#define MAX_PAYLOAD 1000
+#include "ProtocolConstants.h"
 
 enum RdtFlags : uint8_t
 {
@@ -13,7 +13,6 @@ enum RdtFlags : uint8_t
     FLAG_NAK = 1 << 4
 };
 
-// Member B implements this interface (in rdt/RdtSender.cpp / RdtReceiver.cpp).
 class IRdtTransport {
 public:
     virtual ~IRdtTransport() = default;
