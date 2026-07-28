@@ -34,6 +34,19 @@ RdtSender::RdtSender(const std::string &targetIp, uint16_t targetPort,
   inet_pton(AF_INET, targetIp.c_str(), &destAddr.sin_addr);
 }
 
+// Constructor for PASV mode: reuses an already-bound socket owned by the
+// server's PassiveModeHandler. Does NOT call socket() or connect().
+RdtSender::RdtSender(SOCKET existingSocket, const sockaddr_in &targetAddr,
+                     int timeoutMs)
+    : timeoutMs(timeoutMs), udpSocket(existingSocket), destAddr(targetAddr)
+{
+  // Just apply the timeout — everything else is already set up by the caller.
+  DWORD timeout = static_cast<DWORD>(timeoutMs);
+  setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout,
+             sizeof(timeout));
+  std::cout << "[Sender] Initialized with existing PASV socket." << std::endl;
+}
+
 // Destructor: always close the socket to free up OS resources
 RdtSender::~RdtSender()
 {

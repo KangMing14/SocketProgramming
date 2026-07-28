@@ -20,8 +20,13 @@ private:
   bool waitForAck(uint32_t expected_ack_num);
 
 public:
-  // Constructor initializes the socket and sets the destination IP and port
+  // Constructor: creates its own UDP socket and sets the destination
   RdtSender(const std::string &targetIp, uint16_t targetPort,
+            int timeoutMs = 500);
+
+  // Constructor for PASV mode: reuses an already-bound socket (no socket/bind called).
+  // Use this when the server's PassiveModeHandler already owns the socket.
+  RdtSender(SOCKET existingSocket, const sockaddr_in &targetAddr,
             int timeoutMs = 500);
 
   // Destructor closes the socket

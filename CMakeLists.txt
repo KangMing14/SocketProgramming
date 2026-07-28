@@ -77,3 +77,7 @@ add_test(NAME RdtTest COMMAND test_rdt)
 add_executable(test_rdt_payload_bounds tests/test_rdt_payload_bounds.cpp)
 target_link_libraries(test_rdt_payload_bounds PRIVATE ftp_core ws2_32)
 add_test(NAME RdtPayloadTest COMMAND test_rdt_payload_bounds)
+
+add_executable(test_rdt_integration tests/test_rdt_integration.cpp)
+target_link_libraries(test_rdt_integration PRIVATE ftp_core ws2_32)
+add_test(NAME RdtIntegrationTest COMMAND test_rdt_integration)

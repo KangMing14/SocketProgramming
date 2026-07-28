@@ -40,6 +40,17 @@ RdtReceiver::RdtReceiver(uint16_t listenPort) {
             << std::endl;
 }
 
+// Constructor for PASV mode: reuses an already-bound socket owned by the
+// server's PassiveModeHandler. Does NOT call socket() or bind().
+RdtReceiver::RdtReceiver(SOCKET existingSocket)
+    : udpSocket(existingSocket) {
+  // Just apply the timeout — socket is already created and bound by caller.
+  DWORD timeout = 5000;
+  setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout,
+             sizeof(timeout));
+  std::cout << "[Receiver] Initialized with existing PASV socket." << std::endl;
+}
+
 // Destructor: close the socket
 RdtReceiver::~RdtReceiver() {
   if (udpSocket != INVALID_SOCKET) {

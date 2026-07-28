@@ -17,6 +17,10 @@ public:
     // Constructor binds the socket to a specific port to listen
     RdtReceiver(uint16_t listenPort);
 
+    // Constructor for PASV mode: reuses an already-bound socket (no socket/bind called).
+    // Use this when the server's PassiveModeHandler already owns the socket.
+    RdtReceiver(SOCKET existingSocket);
+
     // Destructor closes the socket
     ~RdtReceiver();
 

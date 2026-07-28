@@ -26,6 +26,17 @@ void test_full_size_chunk_survives_round_trip() {
     std::cout << "[PASS] full CHUNK_SIZE payload survives sender/receiver round trip\n";
 }
 
+#include <winsock2.h>
+
 int main() {
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        std::cerr << "WSAStartup failed." << std::endl;
+        return 1;
+    }
+
     test_full_size_chunk_survives_round_trip();
+
+    WSACleanup();
+    return 0;
 }
