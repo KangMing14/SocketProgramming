@@ -13,7 +13,7 @@
 // TEST 1: Basic loopback — send "hello", receive "hello"
 // -------------------------------------------------------------------
 void test_sender_receiver_over_loopback() {
-    RdtReceiver receiver(9999);
+    RdtReceiver receiver((uint16_t)9999);
 
     std::thread receiverThread([&]() {
         uint32_t seq;
@@ -38,7 +38,7 @@ void test_sender_receiver_over_loopback() {
 // TEST 2: Multi-chunk round-trip — send 3 sequential chunks
 // -------------------------------------------------------------------
 void test_multi_chunk_round_trip() {
-    RdtReceiver receiver(9997);
+    RdtReceiver receiver((uint16_t)9997);
 
     std::vector<std::string> expected = {"chunk0", "chunk1", "chunk2"};
     std::vector<std::string> received_chunks;
@@ -67,7 +67,7 @@ void test_multi_chunk_round_trip() {
 // TEST 3: Large payload — 1024 bytes (MAX_PAYLOAD boundary)
 // -------------------------------------------------------------------
 void test_max_payload_boundary() {
-    RdtReceiver receiver(9996);
+    RdtReceiver receiver((uint16_t)9996);
 
     std::thread receiverThread([&]() {
         uint32_t seq;

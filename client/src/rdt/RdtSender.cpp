@@ -1,24 +1,9 @@
 #include "RdtSender.h"
 #include <cstring>
 #include <iostream>
-#include <cstdlib>
-#include <chrono>
-#include <thread>
 
 #define MAX_RETRIES 10
 #define HEADER_SIZE 16
-
-// ---- CHAOS MODE ----
-// Set to 1 to inject artificial network faults for testing reliability.
-// Leave as 0 for normal operation.
-#define CHAOS_MODE 0
-
-#if CHAOS_MODE
-#define CHAOS_DROP_PERCENT   15   // Drop 15% of outgoing packets
-#define CHAOS_CORRUPT_PERCENT 5   // Flip a bit in 5% of payloads
-#define CHAOS_LATENCY_MIN_MS 200  // Minimum artificial latency in ms
-#define CHAOS_LATENCY_MAX_MS 400  // Maximum artificial latency in ms
-#endif
 
 // Constructor: creates the UDP socket, sets timeout, and saves the destination
 // address
@@ -78,7 +63,8 @@ void RdtSender::sendRawPacket(const RdtPacket &packet)
   char sendBuf[HEADER_SIZE + MAX_PAYLOAD];
   memset(sendBuf, 0, sizeof(sendBuf));
 
-  // Serialize the header (with htonl/htons byte order conversion) into the front
+  // Serialize the header (with htonl/htons byte order conversion) into the
+  // front
   serializeHeader(packet.header, sendBuf);
 
   // Copy the payload right after the header
@@ -86,28 +72,6 @@ void RdtSender::sendRawPacket(const RdtPacket &packet)
   if (payload_len > MAX_PAYLOAD)
     payload_len = MAX_PAYLOAD;
   memcpy(sendBuf + HEADER_SIZE, packet.payload, payload_len);
-
-#if CHAOS_MODE
-  // --- Chaos: Artificial latency (200-400ms) ---
-  int latency = CHAOS_LATENCY_MIN_MS +
-                (rand() % (CHAOS_LATENCY_MAX_MS - CHAOS_LATENCY_MIN_MS + 1));
-  std::cerr << "[CHAOS] Sleeping " << latency << "ms before send.\n";
-  std::this_thread::sleep_for(std::chrono::milliseconds(latency));
-
-  // --- Chaos: Drop 15% of packets ---
-  if ((rand() % 100) < CHAOS_DROP_PERCENT) {
-    std::cerr << "[CHAOS] Dropping packet (seq="
-              << packet.header.seq_num << ").\n";
-    return;
-  }
-
-  // --- Chaos: Corrupt 5% of payloads ---
-  if (payload_len > 0 && (rand() % 100) < CHAOS_CORRUPT_PERCENT) {
-    std::cerr << "[CHAOS] Flipping a bit in payload (seq="
-              << packet.header.seq_num << ").\n";
-    sendBuf[HEADER_SIZE] ^= 0x01; // Flip least-significant bit of first byte
-  }
-#endif
 
   // sendto() shoots this flat buffer as a UDP postcard to destAddr
   int totalSize = HEADER_SIZE + payload_len;

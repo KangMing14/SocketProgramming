@@ -13,7 +13,7 @@ void test_full_size_chunk_survives_round_trip() {
     // scenario that previously overflowed the sender's stack buffers.
     std::vector<char> data(ChunkedFileReader::CHUNK_SIZE, 'X');
 
-    RdtReceiver receiver(9998);
+    RdtReceiver receiver((uint16_t)9998);
     std::thread t([&]() {
         uint32_t seq; std::vector<char> out; bool isFinal;
         assert(receiver.receiveNext(seq, out, isFinal));
