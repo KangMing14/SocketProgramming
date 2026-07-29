@@ -9,6 +9,7 @@
 #include "RdtReceiver.h"
 #include "RdtSender.h"
 #include "Sha256Hasher.h"
+#include <memory>
 
 namespace CommandDispatcher{
     std::map<std::string, std::function<void(ClientSession&, const std::vector<std::string>&)>> commandMap = {
@@ -166,12 +167,21 @@ namespace CommandDispatcher{
                 return;
             }
 
-            char peerIp[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &s.pendingPeerAddr.sin_addr, peerIp, sizeof(peerIp));
-            unsigned short peerPort = ntohs(s.pendingPeerAddr.sin_port);
+            std::unique_ptr<IRdtTransport> transport;
+            if (s.dataChannelIsPassive) {
+                transport = std::make_unique<RdtSender>(s.pendingDataSocket);
+                if (!transport->waitForClientReady()) {
+                    Session::replyWithCode(s.socket, ReplyCode::ActionNotTaken, "Handshake failed.");
+                    return;
+                }
+            } else {
+                char peerIp[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &s.pendingPeerAddr.sin_addr, peerIp, sizeof(peerIp));
+                unsigned short peerPort = ntohs(s.pendingPeerAddr.sin_port);
+                transport = std::make_unique<RdtSender>(peerIp, peerPort);
+            }
 
-            RdtSender transport(peerIp, peerPort);
-            DataChannelSession channel(s.pendingDataSocket, s.pendingPeerAddr, transport);
+            DataChannelSession channel(*transport);
 
             Session::replyWithCode(s.socket, ReplyCode::FileStatusOkay, "Opening data connection.");
             bool ok = channel.sendFile(resolved);

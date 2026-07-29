@@ -26,8 +26,7 @@ public:
 
   // Constructor for PASV mode: reuses an already-bound socket (no socket/bind called).
   // Use this when the server's PassiveModeHandler already owns the socket.
-  RdtSender(SOCKET existingSocket, const sockaddr_in &targetAddr,
-            int timeoutMs = 500);
+  RdtSender(SOCKET existingSocket, int timeoutMs = 500);
 
   // Destructor closes the socket
   ~RdtSender();
@@ -36,4 +35,5 @@ public:
   // Returns true if successfully ACKed, false if failed after max retries
   bool sendChunk(uint32_t seqNum, const char* data, size_t len) override;
   bool receiveNext(uint32_t& outSeqNum, std::vector<char>& outData, bool& outIsFinal) override;
+  bool waitForClientReady() override;
 };
