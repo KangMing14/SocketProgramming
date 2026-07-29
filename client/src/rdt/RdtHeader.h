@@ -2,7 +2,7 @@
 #include <cstdint>
 #include <vector>
 
-#include "../common/ProtocolConstants.h"
+#include "ProtocolConstants.h"
 
 enum RdtFlags : uint8_t
 {
