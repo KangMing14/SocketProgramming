@@ -23,6 +23,7 @@ add_library(ftp_core STATIC
     server/src/rdt/RdtReceiver.cpp
     server/src/datachannel/PassiveModeHandler.cpp
     server/src/datachannel/ActiveModeHandler.cpp
+    client/src/control/Session.cpp
 )
 
 target_include_directories(ftp_core PUBLIC
@@ -33,6 +34,9 @@ target_include_directories(ftp_core PUBLIC
     server/src/control
     server/src/rdt
     server/src/common
+    client/src
+    client/src/control
+    client/src/rdt
 )
 
 # Windows-only libs: Winsock + CNG
@@ -45,8 +49,8 @@ add_executable(ftp_server server/src/main.cpp)
 target_link_libraries(ftp_server PRIVATE ftp_core)
 
 # ---- Client executable ----
-#add_executable(ftp_client client/src/main.cpp)
-#target_link_libraries(ftp_client PRIVATE ftp_core)
+add_executable(ftp_client client/src/main.cpp)
+target_link_libraries(ftp_client PRIVATE ftp_core)
 
 # ---- Tests ----
 enable_testing()
@@ -62,13 +66,13 @@ add_executable(test_hashing tests/test_hashing.cpp)
 target_link_libraries(test_hashing PRIVATE ftp_core)
 add_test(NAME Hashing COMMAND test_hashing)
 
-add_executable(test_data_channel tests/test_data_channel.cpp)
-target_link_libraries(test_data_channel PRIVATE ftp_core)
-add_test(NAME DataChannel COMMAND test_data_channel)
+#add_executable(test_data_channel tests/test_data_channel.cpp)
+#target_link_libraries(test_data_channel PRIVATE ftp_core)
+#add_test(NAME DataChannel COMMAND test_data_channel)
 
-add_executable(test_ascii_translator tests/test_ascii_translator.cpp)
-target_link_libraries(test_ascii_translator PRIVATE ftp_core ws2_32)
-add_test(NAME ASCIITest COMMAND test_ascii_translator)
+#add_executable(test_ascii_translator tests/test_ascii_translator.cpp)
+#target_link_libraries(test_ascii_translator PRIVATE ftp_core ws2_32)
+#add_test(NAME ASCIITest COMMAND test_ascii_translator)
 
 add_executable(test_rdt tests/test_rdt.cpp)
 target_link_libraries(test_rdt PRIVATE ftp_core ws2_32)

@@ -69,6 +69,9 @@ namespace Session {
                 if (cmd.type.empty()) replyWithCode(clientSock, ReplyCode::SyntaxError);
                 else CommandDispatcher::executeCommand(session, cmd);
 
+                // Check if client disconnected from server
+                if (session.socket == INVALID_SOCKET) return;
+
                 // Remove the processed command from the session buffer
                 inBuffer.erase(0, newlinePos + 1);
             }
