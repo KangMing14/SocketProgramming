@@ -198,6 +198,13 @@ bool RdtSender::waitForAck(uint32_t expected_ack_num)
 // Builds the packet, sends it, and retransmits on timeout until ACKed
 bool RdtSender::sendChunk(uint32_t seqNum, const char* data, size_t len)
 {
+
+    if (len > MAX_PAYLOAD) {
+        std::cerr << "[Sender] REJECTED: chunk length " << len
+            << " exceeds MAX_PAYLOAD (" << MAX_PAYLOAD << ")." << std::endl;
+        return false;
+    }
+
   // --- Build the packet ---
   RdtPacket packet;
   memset(&packet, 0, sizeof(packet));
