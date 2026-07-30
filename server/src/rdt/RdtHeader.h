@@ -19,6 +19,7 @@ public:
     virtual bool sendChunk(uint32_t seqNum, const char* data, size_t len) = 0;
     virtual bool receiveNext(uint32_t& outSeqNum, std::vector<char>& outData, bool& outIsFinal) = 0;
     virtual bool waitForClientReady() { return true; }
+    virtual bool flush() { return true; }
 };
 
 #pragma pack(push, 1)

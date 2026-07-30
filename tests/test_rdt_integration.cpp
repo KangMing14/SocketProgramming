@@ -29,6 +29,7 @@ void test_sender_receiver_over_loopback() {
 
     RdtSender sender("127.0.0.1", 9999);
     assert(sender.sendChunk(0, "hello", 5) == true);
+    sender.flush();
     receiverThread.join();
 
     std::cout << "[PASS] test_sender_receiver_over_loopback\n";
@@ -57,6 +58,7 @@ void test_multi_chunk_round_trip() {
     for (uint32_t i = 0; i < 3; ++i) {
         assert(sender.sendChunk(i, expected[i].data(), expected[i].size()) == true);
     }
+    sender.flush();
     receiverThread.join();
 
     assert(received_chunks == expected);
@@ -81,7 +83,8 @@ void test_max_payload_boundary() {
 
     std::vector<char> payload(1024, 'Z');
     RdtSender sender("127.0.0.1", 9996);
-    assert(sender.sendChunk(7, payload.data(), payload.size()) == true);
+    assert(sender.sendChunk(0, payload.data(), payload.size()) == true);
+    sender.flush();
     receiverThread.join();
 
     std::cout << "[PASS] test_max_payload_boundary\n";
