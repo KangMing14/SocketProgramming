@@ -44,3 +44,5 @@ struct RdtPacket
 
 void serializeHeader(const RdtHeader &h, char *buf);
 RdtHeader deserializeHeader(const char *buf);
+
+static_assert(sizeof(RdtHeader) == 16, "header must be 16 bytes on the wire");

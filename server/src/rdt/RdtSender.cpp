@@ -5,8 +5,9 @@
 #include <chrono>
 #include <thread>
 
+#include "../common/ProtocolConstants.h"
+
 #define MAX_RETRIES 10
-#define HEADER_SIZE 16
 
 // ---- CHAOS MODE ----
 // Set to 1 to inject artificial network faults for testing reliability.
