@@ -5,8 +5,8 @@
 #include "AsciiChunkedReader.h"
 
 
-DataChannelSession::DataChannelSession(SOCKET dataSocket, sockaddr_in peerAddr, IRdtTransport& transport)
-    : dataSocket(dataSocket), peerAddr(peerAddr), transport(transport) {}
+DataChannelSession::DataChannelSession(IRdtTransport& transport)
+    : transport(transport) {}
 
 bool DataChannelSession::sendFile(const std::filesystem::path& filePath, TransferMode mode) {
     std::vector<char> chunk;

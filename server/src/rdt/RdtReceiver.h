@@ -3,12 +3,14 @@
 #include "CheckSum.h"
 #include <winsock2.h>
 #include <string>
+#include <unordered_set>
 
 class RdtReceiver : public IRdtTransport
 {
 private:
     SOCKET udpSocket;
     sockaddr_in localAddr;
+    std::unordered_set<uint32_t> seen_seq_nums;
 
     // Helper to send an ACK back to whatever address just sent us data
     void sendAck(uint32_t ack_num, sockaddr_in &clientAddr);

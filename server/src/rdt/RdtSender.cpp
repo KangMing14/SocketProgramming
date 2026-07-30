@@ -5,13 +5,14 @@
 #include <chrono>
 #include <thread>
 
+#include "../common/ProtocolConstants.h"
+
 #define MAX_RETRIES 10
-#define HEADER_SIZE 16
 
 // ---- CHAOS MODE ----
 // Set to 1 to inject artificial network faults for testing reliability.
-// Leave as 0 for normal operation.
-#define CHAOS_MODE 0
+// Leave as 1 for normal operation.
+#define CHAOS_MODE 1
 
 #if CHAOS_MODE
 #define CHAOS_DROP_PERCENT   15   // Drop 15% of outgoing packets
@@ -51,10 +52,10 @@ RdtSender::RdtSender(const std::string &targetIp, uint16_t targetPort,
 
 // Constructor for PASV mode: reuses an already-bound socket owned by the
 // server's PassiveModeHandler. Does NOT call socket() or connect().
-RdtSender::RdtSender(SOCKET existingSocket, const sockaddr_in &targetAddr,
-                     int timeoutMs)
-    : timeoutMs(timeoutMs), udpSocket(existingSocket), destAddr(targetAddr)
+RdtSender::RdtSender(SOCKET existingSocket, int timeoutMs)
+    : timeoutMs(timeoutMs), udpSocket(existingSocket)
 {
+  memset(&destAddr, 0, sizeof(destAddr));
   // Just apply the timeout — everything else is already set up by the caller.
   DWORD timeout = static_cast<DWORD>(timeoutMs);
   setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout,
@@ -197,6 +198,13 @@ bool RdtSender::waitForAck(uint32_t expected_ack_num)
 // Builds the packet, sends it, and retransmits on timeout until ACKed
 bool RdtSender::sendChunk(uint32_t seqNum, const char* data, size_t len)
 {
+
+    if (len > MAX_PAYLOAD) {
+        std::cerr << "[Sender] REJECTED: chunk length " << len
+            << " exceeds MAX_PAYLOAD (" << MAX_PAYLOAD << ")." << std::endl;
+        return false;
+    }
+
   // --- Build the packet ---
   RdtPacket packet;
   memset(&packet, 0, sizeof(packet));
@@ -247,4 +255,67 @@ bool RdtSender::sendChunk(uint32_t seqNum, const char* data, size_t len)
 bool RdtSender::receiveNext(uint32_t& outSeqNum, std::vector<char>& outData, bool& outIsFinal) {
     // RdtSender does not receive data chunks.
     return false;
+}
+
+bool RdtSender::waitForClientReady() {
+  std::cout << "[Sender] Waiting for client READY (SYN) packet on PASV port..." << std::endl;
+  char recvBuf[HEADER_SIZE + MAX_PAYLOAD];
+  sockaddr_in clientAddr{};
+  int clientLen = sizeof(clientAddr);
+
+  while (true) {
+    int n = recvfrom(udpSocket, recvBuf, sizeof(recvBuf), 0,
+                     (sockaddr *)&clientAddr, &clientLen);
+
+    if (n == SOCKET_ERROR) {
+      int err = WSAGetLastError();
+      if (err == WSAETIMEDOUT) {
+        // Just keep waiting if it times out
+        continue;
+      }
+      std::cerr << "[Sender] recvfrom() error: " << err << std::endl;
+      return false;
+    }
+
+    if (n < HEADER_SIZE) continue;
+
+    // Verify Checksum
+    char checksumBuf[HEADER_SIZE + MAX_PAYLOAD];
+    memcpy(checksumBuf, recvBuf, n);
+    checksumBuf[13] = 0;
+    checksumBuf[14] = 0;
+
+    uint16_t computed = internetChecksum((const uint8_t *)checksumBuf, n);
+    uint16_t received_checksum;
+    memcpy(&received_checksum, recvBuf + 13, 2);
+    received_checksum = ntohs(received_checksum);
+
+    if (computed != received_checksum) continue;
+
+    RdtHeader header = deserializeHeader(recvBuf);
+
+    if (header.flags & FLAG_SYN) {
+      destAddr = clientAddr;
+      std::cout << "[Sender] Received SYN packet! Client address captured." << std::endl;
+
+      // Send ACK for the SYN
+      RdtHeader ackHeader{};
+      ackHeader.seq_num = 0;
+      ackHeader.ack_num = header.seq_num;
+      ackHeader.flags = FLAG_ACK;
+      ackHeader.window_size = 1;
+      ackHeader.payload_len = 0;
+      ackHeader.reserved = 0;
+      ackHeader.checksum = 0;
+
+      char ackBuf[HEADER_SIZE];
+      serializeHeader(ackHeader, ackBuf);
+      ackHeader.checksum = internetChecksum((const uint8_t *)ackBuf, HEADER_SIZE);
+      serializeHeader(ackHeader, ackBuf);
+
+      sendto(udpSocket, ackBuf, HEADER_SIZE, 0, (sockaddr *)&destAddr, sizeof(destAddr));
+      
+      return true;
+    }
+  }
 }

@@ -2,7 +2,7 @@
 #include <cstring>
 #include <iostream>
 
-#define HEADER_SIZE 16
+#include "../common/ProtocolConstants.h"
 
 // Constructor: creates a UDP socket and BINDS it to a port to listen
 RdtReceiver::RdtReceiver(uint16_t listenPort) {
@@ -164,16 +164,24 @@ bool RdtReceiver::receiveNext(uint32_t &outSeqNum, std::vector<char> &outData,
     if (payload_len > actual_payload)
       payload_len = actual_payload;
 
+    // --- GOLDEN RULE #2: ALWAYS send an ACK back (even for duplicates!) ---
+    sendAck(header.seq_num, clientAddr);
+
+    // Check if this is a duplicate packet
+    if (seen_seq_nums.find(header.seq_num) != seen_seq_nums.end()) {
+      std::cerr << "[Receiver] Duplicate packet seq=" << header.seq_num
+                << ", re-ACKed but ignoring payload." << std::endl;
+      continue;
+    }
+
+    // New packet, record its sequence number
+    seen_seq_nums.insert(header.seq_num);
+
     outData.resize(payload_len);
     memcpy(outData.data(), recvBuf + HEADER_SIZE, payload_len);
 
     outSeqNum = header.seq_num;
     outIsFinal = (header.flags & FLAG_FIN) != 0;
-
-    // --- GOLDEN RULE #2: ALWAYS send an ACK back (even for duplicates!) ---
-    // The caller is responsible for checking the sequence number
-    // to know whether this is a duplicate before writing to disk.
-    sendAck(header.seq_num, clientAddr);
 
     return true; // Return true on success
   }
