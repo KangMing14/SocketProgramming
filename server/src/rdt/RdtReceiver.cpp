@@ -2,7 +2,7 @@
 #include <cstring>
 #include <iostream>
 
-#define HEADER_SIZE 16
+#include "../common/ProtocolConstants.h"
 
 // Constructor: creates a UDP socket and BINDS it to a port to listen
 RdtReceiver::RdtReceiver(uint16_t listenPort) {

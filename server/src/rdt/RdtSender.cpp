@@ -5,8 +5,9 @@
 #include <chrono>
 #include <thread>
 
+#include "../common/ProtocolConstants.h"
+
 #define MAX_RETRIES 10
-#define HEADER_SIZE 16
 
 // ---- CHAOS MODE ----
 // Set to 1 to inject artificial network faults for testing reliability.
@@ -14,10 +15,10 @@
 #define CHAOS_MODE 1
 
 #if CHAOS_MODE
-#define CHAOS_DROP_PERCENT   15   // Drop 15% of outgoing packets
-#define CHAOS_CORRUPT_PERCENT 5   // Flip a bit in 5% of payloads
-#define CHAOS_LATENCY_MIN_MS 200  // Minimum artificial latency in ms
-#define CHAOS_LATENCY_MAX_MS 400  // Maximum artificial latency in ms
+#define CHAOS_DROP_PERCENT 15    // Drop 15% of outgoing packets
+#define CHAOS_CORRUPT_PERCENT 5  // Flip a bit in 5% of payloads
+#define CHAOS_LATENCY_MIN_MS 200 // Minimum artificial latency in ms
+#define CHAOS_LATENCY_MAX_MS 400 // Maximum artificial latency in ms
 #endif
 
 // Constructor: creates the UDP socket, sets timeout, and saves the destination
@@ -95,14 +96,16 @@ void RdtSender::sendRawPacket(const RdtPacket &packet)
   std::this_thread::sleep_for(std::chrono::milliseconds(latency));
 
   // --- Chaos: Drop 15% of packets ---
-  if ((rand() % 100) < CHAOS_DROP_PERCENT) {
+  if ((rand() % 100) < CHAOS_DROP_PERCENT)
+  {
     std::cerr << "[CHAOS] Dropping packet (seq="
               << packet.header.seq_num << ").\n";
     return;
   }
 
   // --- Chaos: Corrupt 5% of payloads ---
-  if (payload_len > 0 && (rand() % 100) < CHAOS_CORRUPT_PERCENT) {
+  if (payload_len > 0 && (rand() % 100) < CHAOS_CORRUPT_PERCENT)
+  {
     std::cerr << "[CHAOS] Flipping a bit in payload (seq="
               << packet.header.seq_num << ").\n";
     sendBuf[HEADER_SIZE] ^= 0x01; // Flip least-significant bit of first byte
@@ -121,29 +124,35 @@ void RdtSender::sendRawPacket(const RdtPacket &packet)
 }
 
 // PRIVATE HELPER: Polls for ACKs (blocking or non-blocking) and handles retransmissions
-void RdtSender::pollAcksAndRetransmit(bool blocking) {
+void RdtSender::pollAcksAndRetransmit(bool blocking)
+{
   fd_set readfds;
   FD_ZERO(&readfds);
   FD_SET(udpSocket, &readfds);
 
   struct timeval tv;
-  if (blocking) {
+  if (blocking)
+  {
     tv.tv_sec = 0;
     tv.tv_usec = 10000; // 10ms blocking wait
-  } else {
+  }
+  else
+  {
     tv.tv_sec = 0;
     tv.tv_usec = 0; // Instant return
   }
 
   // Use select to check for incoming ACKs
   int ready = select(0, &readfds, NULL, NULL, &tv);
-  if (ready > 0 && FD_ISSET(udpSocket, &readfds)) {
+  if (ready > 0 && FD_ISSET(udpSocket, &readfds))
+  {
     char recvBuf[HEADER_SIZE + MAX_PAYLOAD];
     sockaddr_in fromAddr{};
     int fromLen = sizeof(fromAddr);
 
     int n = recvfrom(udpSocket, recvBuf, sizeof(recvBuf), 0, (sockaddr *)&fromAddr, &fromLen);
-    if (n >= HEADER_SIZE) {
+    if (n >= HEADER_SIZE)
+    {
       char checksumBuf[HEADER_SIZE + MAX_PAYLOAD];
       memcpy(checksumBuf, recvBuf, n);
       checksumBuf[13] = 0;
@@ -154,18 +163,23 @@ void RdtSender::pollAcksAndRetransmit(bool blocking) {
       memcpy(&received_checksum, recvBuf + 13, 2);
       received_checksum = ntohs(received_checksum);
 
-      if (computed == received_checksum) {
+      if (computed == received_checksum)
+      {
         RdtHeader ackHeader = deserializeHeader(recvBuf);
-        if (ackHeader.flags & FLAG_ACK) {
+        if (ackHeader.flags & FLAG_ACK)
+        {
           // Find the packet in the window and mark it acked
-          for (auto& pkt : window) {
-            if (pkt.seq_num == ackHeader.ack_num) {
+          for (auto &pkt : window)
+          {
+            if (pkt.seq_num == ackHeader.ack_num)
+            {
               pkt.acked = true;
               break;
             }
           }
           // Slide the window forward if the base is acked
-          while (!window.empty() && window.front().acked) {
+          while (!window.empty() && window.front().acked)
+          {
             window.pop_front();
           }
         }
@@ -175,13 +189,16 @@ void RdtSender::pollAcksAndRetransmit(bool blocking) {
 
   // Check for retransmissions
   auto now = std::chrono::steady_clock::now();
-  for (auto& pkt : window) {
-    if (!pkt.acked) {
+  for (auto &pkt : window)
+  {
+    if (!pkt.acked)
+    {
       auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - pkt.sent_time).count();
-      if (duration > timeoutMs) {
+      if (duration > timeoutMs)
+      {
         // Retransmit
         std::cerr << "[Sender] Timeout for seq=" << pkt.seq_num << ", retransmitting!" << std::endl;
-        
+
         RdtPacket rawPkt;
         memset(&rawPkt, 0, sizeof(rawPkt));
         rawPkt.header.seq_num = pkt.seq_num;
@@ -192,13 +209,13 @@ void RdtSender::pollAcksAndRetransmit(bool blocking) {
         rawPkt.header.reserved = 0;
         rawPkt.header.checksum = 0;
         memcpy(rawPkt.payload, pkt.data.data(), pkt.data.size());
-        
+
         char tempBuf[HEADER_SIZE + MAX_PAYLOAD];
         memset(tempBuf, 0, sizeof(tempBuf));
         serializeHeader(rawPkt.header, tempBuf);
         memcpy(tempBuf + HEADER_SIZE, rawPkt.payload, pkt.data.size());
         rawPkt.header.checksum = internetChecksum((const uint8_t *)tempBuf, HEADER_SIZE + pkt.data.size());
-        
+
         sendRawPacket(rawPkt);
         pkt.sent_time = now; // Reset timer
       }
@@ -207,12 +224,24 @@ void RdtSender::pollAcksAndRetransmit(bool blocking) {
 }
 
 // PUBLIC: High-level Selective Repeat send
-bool RdtSender::sendChunk(uint32_t seqNum, const char* data, size_t len)
+bool RdtSender::sendChunk(uint32_t seqNum, const char *data, size_t len)
 {
   const int WINDOW_SIZE = 10;
 
+  if (len > MAX_PAYLOAD)
+  {
+    std::cerr << "[Sender] REJECTED: chunk length " << len
+              << " exceeds MAX_PAYLOAD (" << MAX_PAYLOAD << ")." << std::endl;
+    return false;
+  }
+
+  // --- Build the packet ---
+  // RdtPacket packet;
+  // memset(&packet, 0, sizeof(packet));
+
   // 1. If window is full, block until space frees up
-  while (window.size() >= WINDOW_SIZE) {
+  while (window.size() >= WINDOW_SIZE)
+  {
     pollAcksAndRetransmit(true);
   }
 
@@ -247,36 +276,43 @@ bool RdtSender::sendChunk(uint32_t seqNum, const char* data, size_t len)
 
   // 4. Quickly check for ACKs before returning
   pollAcksAndRetransmit(false);
-  
+
   return true;
 }
 
 // PUBLIC: Flush remaining in-flight packets
-bool RdtSender::flush() {
-  while (!window.empty()) {
+bool RdtSender::flush()
+{
+  while (!window.empty())
+  {
     pollAcksAndRetransmit(true);
   }
   return true;
 }
 
-bool RdtSender::receiveNext(uint32_t& outSeqNum, std::vector<char>& outData, bool& outIsFinal) {
-    // RdtSender does not receive data chunks.
-    return false;
+bool RdtSender::receiveNext(uint32_t &outSeqNum, std::vector<char> &outData, bool &outIsFinal)
+{
+  // RdtSender does not receive data chunks.
+  return false;
 }
 
-bool RdtSender::waitForClientReady() {
+bool RdtSender::waitForClientReady()
+{
   std::cout << "[Sender] Waiting for client READY (SYN) packet on PASV port..." << std::endl;
   char recvBuf[HEADER_SIZE + MAX_PAYLOAD];
   sockaddr_in clientAddr{};
   int clientLen = sizeof(clientAddr);
 
-  while (true) {
+  while (true)
+  {
     int n = recvfrom(udpSocket, recvBuf, sizeof(recvBuf), 0,
                      (sockaddr *)&clientAddr, &clientLen);
 
-    if (n == SOCKET_ERROR) {
+    if (n == SOCKET_ERROR)
+    {
       int err = WSAGetLastError();
-      if (err == WSAETIMEDOUT) {
+      if (err == WSAETIMEDOUT)
+      {
         // Just keep waiting if it times out
         continue;
       }
@@ -284,7 +320,8 @@ bool RdtSender::waitForClientReady() {
       return false;
     }
 
-    if (n < HEADER_SIZE) continue;
+    if (n < HEADER_SIZE)
+      continue;
 
     // Verify Checksum
     char checksumBuf[HEADER_SIZE + MAX_PAYLOAD];
@@ -297,11 +334,13 @@ bool RdtSender::waitForClientReady() {
     memcpy(&received_checksum, recvBuf + 13, 2);
     received_checksum = ntohs(received_checksum);
 
-    if (computed != received_checksum) continue;
+    if (computed != received_checksum)
+      continue;
 
     RdtHeader header = deserializeHeader(recvBuf);
 
-    if (header.flags & FLAG_SYN) {
+    if (header.flags & FLAG_SYN)
+    {
       destAddr = clientAddr;
       std::cout << "[Sender] Received SYN packet! Client address captured." << std::endl;
 
@@ -321,7 +360,7 @@ bool RdtSender::waitForClientReady() {
       serializeHeader(ackHeader, ackBuf);
 
       sendto(udpSocket, ackBuf, HEADER_SIZE, 0, (sockaddr *)&destAddr, sizeof(destAddr));
-      
+
       return true;
     }
   }
