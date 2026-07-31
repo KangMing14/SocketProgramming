@@ -5,6 +5,9 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <stdio.h>
+#include <chrono>
+#include <deque>
+#include <vector>
 
 class RdtSender : public IRdtTransport
 {
@@ -16,8 +19,19 @@ private:
   // Helper to physically send the packet
   void sendRawPacket(const RdtPacket &packet);
 
-  // Helper to wait for the ACK
-  bool waitForAck(uint32_t expected_ack_num);
+  struct InFlightPacket {
+      uint32_t seq_num;
+      std::vector<char> data;
+      std::chrono::steady_clock::time_point sent_time;
+      bool acked;
+  };
+  
+  std::deque<InFlightPacket> window;
+  uint32_t send_base = 0;
+  uint32_t next_seq = 0;
+
+  // Helper to poll ACKs non-blockingly (or blockingly) and retransmit
+  void pollAcksAndRetransmit(bool blocking);
 
 public:
   // Constructor: creates its own UDP socket and sets the destination
@@ -36,4 +50,5 @@ public:
   bool sendChunk(uint32_t seqNum, const char* data, size_t len) override;
   bool receiveNext(uint32_t& outSeqNum, std::vector<char>& outData, bool& outIsFinal) override;
   bool waitForClientReady() override;
+  bool flush() override;
 };

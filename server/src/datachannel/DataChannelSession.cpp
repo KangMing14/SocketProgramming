@@ -28,7 +28,7 @@ bool DataChannelSession::sendFile(const std::filesystem::path& filePath, Transfe
             seq++;
         }
     }
-    return true;
+    return transport.flush();
 }
 
 bool DataChannelSession::receiveFile(const std::filesystem::path& destPath, TransferMode mode) {
