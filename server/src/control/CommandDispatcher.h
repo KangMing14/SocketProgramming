@@ -10,5 +10,4 @@
 
 namespace CommandDispatcher{
     void executeCommand(ClientSession&, const ParsedCommand);
-    void quitSession(ClientSession&, const std::vector<std::string>&);
 }

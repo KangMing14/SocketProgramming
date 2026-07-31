@@ -23,7 +23,12 @@ namespace CommandDispatcher{
             Session::replyWithCode(s.socket, ReplyCode::LoggedIn, "User logged in.");
         }},
 
-        { "QUIT", [](ClientSession& s, const std::vector<std::string>& args) { quitSession(s, args); }},
+        { "QUIT", [](ClientSession& s, const std::vector<std::string>& args) {
+            Session::replyWithCode(s.socket, ReplyCode::Goodbye, "Service closing control connection.");
+            shutdown(s.socket, SD_SEND);
+            closesocket(s.socket);
+            s.socket = INVALID_SOCKET;
+        }},
 
         { "NOOP", [](ClientSession& s, const std::vector<std::string>&) {
             Session::replyWithCode(s.socket, ReplyCode::ActionCompleted, "NOOP OK.");
@@ -250,12 +255,5 @@ namespace CommandDispatcher{
         else {
             Session::replyWithCode(s.socket, ReplyCode::SyntaxError, "Command not found: " + cmd.type);
         }
-    }
-
-    void quitSession(ClientSession& s, const std::vector<std::string>& args){
-        Session::replyWithCode(s.socket, ReplyCode::Goodbye, "Service closing control connection.");
-        shutdown(s.socket, SD_SEND);
-        closesocket(s.socket);
-        s.socket = INVALID_SOCKET;
     }
 }
