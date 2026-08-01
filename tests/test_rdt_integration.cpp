@@ -91,6 +91,30 @@ void test_max_payload_boundary() {
 }
 
 // -------------------------------------------------------------------
+// TEST 4: Missing Receiver (Max Retries Abort)
+// -------------------------------------------------------------------
+void test_retransmission_abort() {
+    // Note: We deliberately do NOT start a receiver here.
+    // The sender will send, timeout, retry up to MAX_RETRIES, and abort.
+    std::cout << "[Test] Expecting fatal retransmission abort in this test...\n";
+    
+    // Use a very short timeout (e.g. 50ms) so the test runs fast.
+    RdtSender sender("127.0.0.1", 9995, 50);
+    
+    // sendChunk returns false if pollAcksAndRetransmit fails (aborts).
+    bool success = sender.sendChunk(0, "abort", 5);
+    
+    // In Selective Repeat, sendChunk might return true immediately if the window isn't full.
+    // So the actual abort will be caught in flush().
+    if (success) {
+        success = sender.flush();
+    }
+    
+    assert(success == false);
+    std::cout << "[PASS] test_retransmission_abort\n";
+}
+
+// -------------------------------------------------------------------
 // MAIN
 // -------------------------------------------------------------------
 int main() {
@@ -105,6 +129,7 @@ int main() {
     test_sender_receiver_over_loopback();
     test_multi_chunk_round_trip();
     test_max_payload_boundary();
+    test_retransmission_abort();
 
     std::cout << "\nAll integration tests PASSED!\n";
 

@@ -124,7 +124,7 @@ void RdtSender::sendRawPacket(const RdtPacket &packet)
 }
 
 // PRIVATE HELPER: Polls for ACKs (blocking or non-blocking) and handles retransmissions
-void RdtSender::pollAcksAndRetransmit(bool blocking)
+bool RdtSender::pollAcksAndRetransmit(bool blocking)
 {
   fd_set readfds;
   FD_ZERO(&readfds);
@@ -142,48 +142,68 @@ void RdtSender::pollAcksAndRetransmit(bool blocking)
     tv.tv_usec = 0; // Instant return
   }
 
-  // Use select to check for incoming ACKs
-  int ready = select(0, &readfds, NULL, NULL, &tv);
-  if (ready > 0 && FD_ISSET(udpSocket, &readfds))
+  while (true)
   {
-    char recvBuf[HEADER_SIZE + MAX_PAYLOAD];
-    sockaddr_in fromAddr{};
-    int fromLen = sizeof(fromAddr);
-
-    int n = recvfrom(udpSocket, recvBuf, sizeof(recvBuf), 0, (sockaddr *)&fromAddr, &fromLen);
-    if (n >= HEADER_SIZE)
+    FD_ZERO(&readfds);
+    FD_SET(udpSocket, &readfds);
+    // Use select to check for incoming ACKs
+    int ready = select(0, &readfds, NULL, NULL, &tv);
+    if (ready > 0 && FD_ISSET(udpSocket, &readfds))
     {
-      char checksumBuf[HEADER_SIZE + MAX_PAYLOAD];
-      memcpy(checksumBuf, recvBuf, n);
-      checksumBuf[13] = 0;
-      checksumBuf[14] = 0;
+      char recvBuf[HEADER_SIZE + MAX_PAYLOAD];
+      sockaddr_in fromAddr{};
+      int fromLen = sizeof(fromAddr);
 
-      uint16_t computed = internetChecksum((const uint8_t *)checksumBuf, n);
-      uint16_t received_checksum;
-      memcpy(&received_checksum, recvBuf + 13, 2);
-      received_checksum = ntohs(received_checksum);
-
-      if (computed == received_checksum)
+      int n = recvfrom(udpSocket, recvBuf, sizeof(recvBuf), 0, (sockaddr *)&fromAddr, &fromLen);
+      if (n < 0)
       {
-        RdtHeader ackHeader = deserializeHeader(recvBuf);
-        if (ackHeader.flags & FLAG_ACK)
+        // Socket error (e.g. WSAECONNRESET from ICMP Port Unreachable).
+        // Break out to prevent infinite select() loop on Windows.
+        break;
+      }
+
+      if (n >= HEADER_SIZE)
+      {
+        char checksumBuf[HEADER_SIZE + MAX_PAYLOAD];
+        memcpy(checksumBuf, recvBuf, n);
+        checksumBuf[13] = 0;
+        checksumBuf[14] = 0;
+
+        uint16_t computed = internetChecksum((const uint8_t *)checksumBuf, n);
+        uint16_t received_checksum;
+        memcpy(&received_checksum, recvBuf + 13, 2);
+        received_checksum = ntohs(received_checksum);
+
+        if (computed == received_checksum)
         {
-          // Find the packet in the window and mark it acked
-          for (auto &pkt : window)
+          RdtHeader ackHeader = deserializeHeader(recvBuf);
+          if (ackHeader.flags & FLAG_ACK)
           {
-            if (pkt.seq_num == ackHeader.ack_num)
+            // Find the packet in the window and mark it acked
+            for (auto &pkt : window)
             {
-              pkt.acked = true;
-              break;
+              if (pkt.seq_num == ackHeader.ack_num)
+              {
+                pkt.acked = true;
+                break;
+              }
             }
-          }
-          // Slide the window forward if the base is acked
-          while (!window.empty() && window.front().acked)
-          {
-            window.pop_front();
+            // Slide the window forward if the base is acked
+            while (!window.empty() && window.front().acked)
+            {
+              window.pop_front();
+            }
           }
         }
       }
+      
+      // Force subsequent select calls in this loop to be non-blocking
+      tv.tv_sec = 0;
+      tv.tv_usec = 0;
+    }
+    else
+    {
+      break;
     }
   }
 
@@ -196,8 +216,15 @@ void RdtSender::pollAcksAndRetransmit(bool blocking)
       auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - pkt.sent_time).count();
       if (duration > timeoutMs)
       {
+        pkt.retries++;
+        if (pkt.retries >= MAX_RETRIES)
+        {
+          std::cerr << "[Sender] FATAL: seq=" << pkt.seq_num << " failed after " << MAX_RETRIES << " retries. Aborting." << std::endl;
+          return false;
+        }
+
         // Retransmit
-        std::cerr << "[Sender] Timeout for seq=" << pkt.seq_num << ", retransmitting!" << std::endl;
+        std::cerr << "[Sender] Timeout for seq=" << pkt.seq_num << ", retransmitting (attempt " << pkt.retries << ")!" << std::endl;
 
         RdtPacket rawPkt;
         memset(&rawPkt, 0, sizeof(rawPkt));
@@ -221,6 +248,7 @@ void RdtSender::pollAcksAndRetransmit(bool blocking)
       }
     }
   }
+  return true;
 }
 
 // PUBLIC: High-level Selective Repeat send
@@ -235,14 +263,10 @@ bool RdtSender::sendChunk(uint32_t seqNum, const char *data, size_t len)
     return false;
   }
 
-  // --- Build the packet ---
-  // RdtPacket packet;
-  // memset(&packet, 0, sizeof(packet));
-
   // 1. If window is full, block until space frees up
   while (window.size() >= WINDOW_SIZE)
   {
-    pollAcksAndRetransmit(true);
+    if (!pollAcksAndRetransmit(true)) return false;
   }
 
   // 2. Add packet to window
@@ -251,6 +275,7 @@ bool RdtSender::sendChunk(uint32_t seqNum, const char *data, size_t len)
   pkt.data.assign(data, data + len);
   pkt.sent_time = std::chrono::steady_clock::now();
   pkt.acked = false;
+  pkt.retries = 0;
   window.push_back(pkt);
 
   // 3. Send the packet
@@ -275,7 +300,7 @@ bool RdtSender::sendChunk(uint32_t seqNum, const char *data, size_t len)
   sendRawPacket(rawPkt);
 
   // 4. Quickly check for ACKs before returning
-  pollAcksAndRetransmit(false);
+  if (!pollAcksAndRetransmit(false)) return false;
 
   return true;
 }
@@ -285,7 +310,7 @@ bool RdtSender::flush()
 {
   while (!window.empty())
   {
-    pollAcksAndRetransmit(true);
+    if (!pollAcksAndRetransmit(true)) return false;
   }
   return true;
 }

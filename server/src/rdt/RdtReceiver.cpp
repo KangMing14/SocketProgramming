@@ -157,19 +157,17 @@ bool RdtReceiver::receiveNext(uint32_t &outSeqNum, std::vector<char> &outData,
       memcpy(outData.data(), recvBuf + HEADER_SIZE, payload_len);
       outSeqNum = header.seq_num;
       outIsFinal = (header.flags & FLAG_FIN) != 0;
-      seen_seq_nums.insert(header.seq_num);
       expected_seq++;
       return true;
     } else if (header.seq_num > expected_seq) {
       // Out-of-order packet (future)
       // Enforce strict upper bound to prevent memory exhaustion
       if (header.seq_num <= expected_seq + WINDOW_SIZE) {
-        if (seen_seq_nums.find(header.seq_num) == seen_seq_nums.end()) {
+        if (outOfOrderBuffer.find(header.seq_num) == outOfOrderBuffer.end()) {
           std::vector<char> data(payload_len);
           memcpy(data.data(), recvBuf + HEADER_SIZE, payload_len);
           bool isFin = (header.flags & FLAG_FIN) != 0;
           outOfOrderBuffer[header.seq_num] = std::make_pair(data, isFin);
-          seen_seq_nums.insert(header.seq_num);
         }
       } else {
         std::cerr << "[Receiver] Packet seq=" << header.seq_num << " is too far ahead (>" << expected_seq + WINDOW_SIZE << "), dropping." << std::endl;

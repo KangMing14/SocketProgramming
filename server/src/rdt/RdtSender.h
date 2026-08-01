@@ -24,14 +24,13 @@ private:
       std::vector<char> data;
       std::chrono::steady_clock::time_point sent_time;
       bool acked;
+      int retries;
   };
   
   std::deque<InFlightPacket> window;
-  uint32_t send_base = 0;
-  uint32_t next_seq = 0;
 
   // Helper to poll ACKs non-blockingly (or blockingly) and retransmit
-  void pollAcksAndRetransmit(bool blocking);
+  bool pollAcksAndRetransmit(bool blocking);
 
 public:
   // Constructor: creates its own UDP socket and sets the destination
