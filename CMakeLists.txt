@@ -43,6 +43,20 @@ target_include_directories(ftp_core PUBLIC
     client/src/rdt
 )
 
+option(ENABLE_RDT_DEBUG "Enable RDT debug logging" OFF)
+if(ENABLE_RDT_DEBUG)
+    target_compile_definitions(ftp_core PRIVATE RDT_DEBUG=1)
+else()
+    target_compile_definitions(ftp_core PRIVATE RDT_DEBUG=0)
+endif()
+
+option(ENABLE_CHAOS_MODE "Enable artificial RDT network failures" OFF)
+if(ENABLE_CHAOS_MODE)
+    target_compile_definitions(ftp_core PRIVATE CHAOS_MODE=1)
+else()
+    target_compile_definitions(ftp_core PRIVATE CHAOS_MODE=0)
+endif()
+
 # Windows-only libs: Winsock + CNG
 if(WIN32)
     target_link_libraries(ftp_core PUBLIC ws2_32 bcrypt)
@@ -88,8 +102,20 @@ add_test(NAME RdtPayloadTest COMMAND test_rdt_payload_bounds)
 
 add_executable(test_rdt_integration tests/test_rdt_integration.cpp)
 target_link_libraries(test_rdt_integration PRIVATE ftp_core ws2_32)
-add_test(NAME RdtIntegrationTest COMMAND test_rdt_integration)
 
-add_executable(test_chaos_integrity tests/test_chaos_integrity.cpp)
-target_link_libraries(test_chaos_integrity PRIVATE ftp_core ws2_32)
-add_test(NAME ChaosTest COMMAND test_chaos_integrity)
+add_executable(test_rdt_congestion tests/test_rdt_congestion.cpp)
+target_link_libraries(test_rdt_congestion PRIVATE ftp_core ws2_32)
+
+if(ENABLE_CHAOS_MODE)
+    add_executable(test_chaos_integrity tests/test_chaos_integrity.cpp)
+    target_link_libraries(test_chaos_integrity PRIVATE ftp_core ws2_32)
+    add_test(NAME ChaosTest COMMAND test_chaos_integrity)
+    set_tests_properties(ChaosTest PROPERTIES LABELS "chaos")
+else()
+    add_test(NAME RdtIntegrationTest COMMAND test_rdt_integration)
+    add_test(NAME RdtCongestionTest COMMAND test_rdt_congestion)
+    set_tests_properties(
+        RdtIntegrationTest RdtCongestionTest
+        PROPERTIES LABELS "deterministic"
+    )
+endif()

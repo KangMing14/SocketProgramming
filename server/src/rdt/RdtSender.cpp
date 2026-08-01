@@ -4,15 +4,22 @@
 #include <cstdlib>
 #include <chrono>
 #include <thread>
+#include <algorithm>
+#include <cmath>
 
 #include "../common/ProtocolConstants.h"
 
 #define MAX_RETRIES 10
 
+#ifndef RDT_DEBUG
+#define RDT_DEBUG 0
+#endif
+
 // ---- CHAOS MODE ----
-// Set to 1 to inject artificial network faults for testing reliability.
-// Leave as 1 for normal operation.
-#define CHAOS_MODE 1
+// Set to 0 for normal operation and 1 for chaos testing.
+#ifndef CHAOS_MODE
+#define CHAOS_MODE 0
+#endif
 
 #if CHAOS_MODE
 #define CHAOS_DROP_PERCENT 15    // Drop 15% of outgoing packets
@@ -24,8 +31,12 @@
 // Constructor: creates the UDP socket, sets timeout, and saves the destination
 // address
 RdtSender::RdtSender(const std::string &targetIp, uint16_t targetPort,
-                     int timeoutMs)
-    : timeoutMs(timeoutMs)
+                     int initialTimeoutMs)
+    : timeoutMs(std::clamp(initialTimeoutMs, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS)),
+      estimatedRttMs(timeoutMs),
+      devRttMs(0.0),
+      cwnd(INITIAL_CWND),
+      cleanAcks(0)
 {
   // Step 1: Create a UDP (SOCK_DGRAM) socket
   udpSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -52,8 +63,13 @@ RdtSender::RdtSender(const std::string &targetIp, uint16_t targetPort,
 
 // Constructor for PASV mode: reuses an already-bound socket owned by the
 // server's PassiveModeHandler. Does NOT call socket() or connect().
-RdtSender::RdtSender(SOCKET existingSocket, int timeoutMs)
-    : timeoutMs(timeoutMs), udpSocket(existingSocket)
+RdtSender::RdtSender(SOCKET existingSocket, int initialTimeoutMs)
+    : udpSocket(existingSocket),
+      timeoutMs(std::clamp(initialTimeoutMs, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS)),
+      estimatedRttMs(timeoutMs),
+      devRttMs(0.0),
+      cwnd(INITIAL_CWND),
+      cleanAcks(0)
 {
   memset(&destAddr, 0, sizeof(destAddr));
   // Just apply the timeout — everything else is already set up by the caller.
@@ -72,8 +88,59 @@ RdtSender::~RdtSender()
   }
 }
 
+double RdtSender::getCongestionWindow() const noexcept { return cwnd; }
+int RdtSender::getTimeoutMs() const noexcept { return timeoutMs; }
+double RdtSender::getEstimatedRttMs() const noexcept { return estimatedRttMs; }
+double RdtSender::getDevRttMs() const noexcept { return devRttMs; }
+size_t RdtSender::getCleanAckCount() const noexcept { return cleanAcks; }
+
+size_t RdtSender::effectiveWindowSize() const {
+    return std::max<size_t>(
+        1,
+        static_cast<size_t>(std::floor(cwnd))
+    );
+}
+
+void RdtSender::updateRtt(double sampleRttMs) {
+    const double previousEstimatedRtt = estimatedRttMs;
+
+    devRttMs =
+        (1.0 - RTT_BETA) * devRttMs +
+        RTT_BETA *
+            std::abs(sampleRttMs - previousEstimatedRtt);
+
+    estimatedRttMs =
+        (1.0 - RTT_ALPHA) * estimatedRttMs +
+        RTT_ALPHA * sampleRttMs;
+
+    timeoutMs = std::clamp(
+        static_cast<int>(std::ceil(
+            estimatedRttMs + 4.0 * devRttMs
+        )),
+        MIN_TIMEOUT_MS,
+        MAX_TIMEOUT_MS
+    );
+}
+
+void RdtSender::applyCongestionDecrease() {
+    double previousCwnd = cwnd;
+    cwnd = std::max(MIN_CWND, cwnd / 2.0);
+    cleanAcks = 0;
+
+    timeoutMs = std::clamp(
+        timeoutMs * 2,
+        MIN_TIMEOUT_MS,
+        MAX_TIMEOUT_MS
+    );
+#if RDT_DEBUG
+    std::cerr << "[RDT] Congestion event: cwnd "
+              << previousCwnd << " -> " << cwnd
+              << ", RTO=" << timeoutMs << "ms\n";
+#endif
+}
+
 // PRIVATE HELPER: Physically serialize and shoot one packet into the network
-void RdtSender::sendRawPacket(const RdtPacket &packet)
+bool RdtSender::sendRawPacket(const RdtPacket &packet, std::chrono::steady_clock::time_point &outSendTime)
 {
   // We need a flat byte buffer: [16-byte header][payload bytes]
   char sendBuf[HEADER_SIZE + MAX_PAYLOAD];
@@ -92,39 +159,62 @@ void RdtSender::sendRawPacket(const RdtPacket &packet)
   // --- Chaos: Artificial latency (200-400ms) ---
   int latency = CHAOS_LATENCY_MIN_MS +
                 (rand() % (CHAOS_LATENCY_MAX_MS - CHAOS_LATENCY_MIN_MS + 1));
-  std::cerr << "[CHAOS] Sleeping " << latency << "ms before send.\n";
-  std::this_thread::sleep_for(std::chrono::milliseconds(latency));
-
-  // --- Chaos: Drop 15% of packets ---
-  if ((rand() % 100) < CHAOS_DROP_PERCENT)
-  {
-    std::cerr << "[CHAOS] Dropping packet (seq="
-              << packet.header.seq_num << ").\n";
-    return;
-  }
-
-  // --- Chaos: Corrupt 5% of payloads ---
-  if (payload_len > 0 && (rand() % 100) < CHAOS_CORRUPT_PERCENT)
-  {
-    std::cerr << "[CHAOS] Flipping a bit in payload (seq="
-              << packet.header.seq_num << ").\n";
-    sendBuf[HEADER_SIZE] ^= 0x01; // Flip least-significant bit of first byte
-  }
+#if RDT_DEBUG
+    std::cerr << "[CHAOS] Sleeping " << latency << "ms before send.\n";
 #endif
+    std::this_thread::sleep_for(std::chrono::milliseconds(latency));
+  
+    // --- Chaos: Drop 15% of packets ---
+    if ((rand() % 100) < CHAOS_DROP_PERCENT)
+    {
+#if RDT_DEBUG
+      std::cerr << "[CHAOS] Dropping packet (seq="
+                << packet.header.seq_num << ").\n";
+#endif
+      outSendTime = std::chrono::steady_clock::now();
+      return true;
+    }
+  
+    // --- Chaos: Corrupt 5% of payloads ---
+    if (payload_len > 0 && (rand() % 100) < CHAOS_CORRUPT_PERCENT)
+    {
+#if RDT_DEBUG
+      std::cerr << "[CHAOS] Flipping a bit in payload (seq="
+                << packet.header.seq_num << ").\n";
+#endif
+      sendBuf[HEADER_SIZE] ^= 0x01; // Flip least-significant bit of first byte
+    }
+#endif
+  
+    // sendto() shoots this flat buffer as a UDP postcard to destAddr
+    int totalSize = HEADER_SIZE + payload_len;
 
-  // sendto() shoots this flat buffer as a UDP postcard to destAddr
-  int totalSize = HEADER_SIZE + payload_len;
-  int sent = sendto(udpSocket, sendBuf, totalSize, 0, (sockaddr *)&destAddr,
-                    sizeof(destAddr));
+    if (injectedPreSendDelay) {
+        injectedPreSendDelay();
+    }
 
-  if (sent == SOCKET_ERROR)
-  {
-    std::cerr << "[Sender] sendto() failed: " << WSAGetLastError() << std::endl;
-  }
+    const auto sendTime = std::chrono::steady_clock::now();
+
+    int sent;
+    if (injectedSendTo) {
+        sent = injectedSendTo(udpSocket, sendBuf, totalSize, 0, (sockaddr *)&destAddr, sizeof(destAddr));
+    } else {
+        sent = sendto(udpSocket, sendBuf, totalSize, 0, (sockaddr *)&destAddr, sizeof(destAddr));
+    }
+  
+    if (sent == SOCKET_ERROR)
+    {
+      const int errorCode = WSAGetLastError();
+      std::cerr << "[Sender] sendto() failed: " << errorCode << std::endl;
+      return false;
+    }
+
+    outSendTime = sendTime;
+    return true;
 }
 
 // PRIVATE HELPER: Polls for ACKs (blocking or non-blocking) and handles retransmissions
-void RdtSender::pollAcksAndRetransmit(bool blocking)
+bool RdtSender::pollAcksAndRetransmit(bool blocking)
 {
   fd_set readfds;
   FD_ZERO(&readfds);
@@ -142,69 +232,141 @@ void RdtSender::pollAcksAndRetransmit(bool blocking)
     tv.tv_usec = 0; // Instant return
   }
 
-  // Use select to check for incoming ACKs
-  int ready = select(0, &readfds, NULL, NULL, &tv);
-  if (ready > 0 && FD_ISSET(udpSocket, &readfds))
+  while (true)
   {
-    char recvBuf[HEADER_SIZE + MAX_PAYLOAD];
-    sockaddr_in fromAddr{};
-    int fromLen = sizeof(fromAddr);
-
-    int n = recvfrom(udpSocket, recvBuf, sizeof(recvBuf), 0, (sockaddr *)&fromAddr, &fromLen);
-    if (n >= HEADER_SIZE)
+    FD_ZERO(&readfds);
+    FD_SET(udpSocket, &readfds);
+    // Use select to check for incoming ACKs
+    int ready = select(0, &readfds, NULL, NULL, &tv);
+    if (ready > 0 && FD_ISSET(udpSocket, &readfds))
     {
-      char checksumBuf[HEADER_SIZE + MAX_PAYLOAD];
-      memcpy(checksumBuf, recvBuf, n);
-      checksumBuf[13] = 0;
-      checksumBuf[14] = 0;
+      char recvBuf[HEADER_SIZE + MAX_PAYLOAD];
+      sockaddr_in fromAddr{};
+      int fromLen = sizeof(fromAddr);
 
-      uint16_t computed = internetChecksum((const uint8_t *)checksumBuf, n);
-      uint16_t received_checksum;
-      memcpy(&received_checksum, recvBuf + 13, 2);
-      received_checksum = ntohs(received_checksum);
-
-      if (computed == received_checksum)
+      int n = recvfrom(udpSocket, recvBuf, sizeof(recvBuf), 0, (sockaddr *)&fromAddr, &fromLen);
+      if (n < 0)
       {
-        RdtHeader ackHeader = deserializeHeader(recvBuf);
-        if (ackHeader.flags & FLAG_ACK)
+        // Socket error (e.g. WSAECONNRESET from ICMP Port Unreachable).
+        // Break out to prevent infinite select() loop on Windows.
+        break;
+      }
+
+      if (n >= HEADER_SIZE)
+      {
+        char checksumBuf[HEADER_SIZE + MAX_PAYLOAD];
+        memcpy(checksumBuf, recvBuf, n);
+        checksumBuf[13] = 0;
+        checksumBuf[14] = 0;
+
+        uint16_t computed = internetChecksum((const uint8_t *)checksumBuf, n);
+        uint16_t received_checksum;
+        memcpy(&received_checksum, recvBuf + 13, 2);
+        received_checksum = ntohs(received_checksum);
+
+        if (computed == received_checksum)
         {
-          // Find the packet in the window and mark it acked
-          for (auto &pkt : window)
+          RdtHeader ackHeader = deserializeHeader(recvBuf);
+          if (ackHeader.flags & FLAG_ACK)
           {
-            if (pkt.seq_num == ackHeader.ack_num)
+            // Find the packet in the window and mark it acked
+            for (auto &pkt : window)
             {
-              pkt.acked = true;
-              break;
+              if (pkt.seq_num == ackHeader.ack_num && !pkt.acked)
+              {
+                pkt.acked = true;
+
+                if (!pkt.retransmitted) {
+                    const auto ackTime = std::chrono::steady_clock::now();
+                    const double sampleRttMs =
+                        std::chrono::duration<double, std::milli>(
+                            ackTime - pkt.sent_time
+                        ).count();
+
+                    updateRtt(sampleRttMs);
+                    cleanAcks++;
+
+                    if (cleanAcks >= effectiveWindowSize()) {
+                        cwnd += 1.0;
+                        cleanAcks = 0;
+                    }
+
+#if RDT_DEBUG
+                    std::cout
+                        << "[RDT] ACK seq=" << pkt.seq_num
+                        << " SampleRTT=" << sampleRttMs << "ms"
+                        << " EstimatedRTT=" << estimatedRttMs << "ms"
+                        << " DevRTT=" << devRttMs << "ms"
+                        << " RTO=" << timeoutMs << "ms"
+                        << " cwnd=" << cwnd
+                        << '\n';
+#endif
+                }
+                break;
+              }
             }
-          }
-          // Slide the window forward if the base is acked
-          while (!window.empty() && window.front().acked)
-          {
-            window.pop_front();
+            // Slide the window forward if the base is acked
+            while (!window.empty() && window.front().acked)
+            {
+              window.pop_front();
+            }
           }
         }
       }
+      
+      // Force subsequent select calls in this loop to be non-blocking
+      tv.tv_sec = 0;
+      tv.tv_usec = 0;
+    }
+    else
+    {
+      break;
     }
   }
 
   // Check for retransmissions
   auto now = std::chrono::steady_clock::now();
+  bool congestionEvent = false;
+  int currentTimeoutMs = timeoutMs;
+
   for (auto &pkt : window)
   {
     if (!pkt.acked)
     {
       auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - pkt.sent_time).count();
-      if (duration > timeoutMs)
+      if (duration > currentTimeoutMs)
       {
+        congestionEvent = true;
+      }
+    }
+  }
+
+  if (congestionEvent) {
+    applyCongestionDecrease();
+  }
+
+  for (auto &pkt : window)
+  {
+    if (!pkt.acked)
+    {
+      auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - pkt.sent_time).count();
+      if (duration > currentTimeoutMs)
+      {
+        if (pkt.retries >= MAX_RETRIES)
+        {
+          std::cerr << "[Sender] FATAL: seq=" << pkt.seq_num << " failed after " << MAX_RETRIES << " retries. Aborting." << std::endl;
+          return false;
+        }
+
         // Retransmit
-        std::cerr << "[Sender] Timeout for seq=" << pkt.seq_num << ", retransmitting!" << std::endl;
+        std::cerr << "[Sender] Timeout for seq=" << pkt.seq_num << ", retransmitting (attempt " << (pkt.retries + 1) << ")!" << std::endl;
 
         RdtPacket rawPkt;
         memset(&rawPkt, 0, sizeof(rawPkt));
         rawPkt.header.seq_num = pkt.seq_num;
         rawPkt.header.ack_num = 0;
         rawPkt.header.flags = FLAG_DATA;
-        rawPkt.header.window_size = 10;
+        rawPkt.header.window_size = static_cast<uint16_t>(effectiveWindowSize());
         rawPkt.header.payload_len = static_cast<uint16_t>(pkt.data.size());
         rawPkt.header.reserved = 0;
         rawPkt.header.checksum = 0;
@@ -216,18 +378,23 @@ void RdtSender::pollAcksAndRetransmit(bool blocking)
         memcpy(tempBuf + HEADER_SIZE, rawPkt.payload, pkt.data.size());
         rawPkt.header.checksum = internetChecksum((const uint8_t *)tempBuf, HEADER_SIZE + pkt.data.size());
 
-        sendRawPacket(rawPkt);
-        pkt.sent_time = now; // Reset timer
+        std::chrono::steady_clock::time_point actualSendTime;
+        if (!sendRawPacket(rawPkt, actualSendTime)) {
+            return false;
+        }
+
+        pkt.retries++;
+        pkt.sent_time = actualSendTime;
+        pkt.retransmitted = true;
       }
     }
   }
+  return true;
 }
 
 // PUBLIC: High-level Selective Repeat send
 bool RdtSender::sendChunk(uint32_t seqNum, const char *data, size_t len)
 {
-  const int WINDOW_SIZE = 10;
-
   if (len > MAX_PAYLOAD)
   {
     std::cerr << "[Sender] REJECTED: chunk length " << len
@@ -235,31 +402,19 @@ bool RdtSender::sendChunk(uint32_t seqNum, const char *data, size_t len)
     return false;
   }
 
-  // --- Build the packet ---
-  // RdtPacket packet;
-  // memset(&packet, 0, sizeof(packet));
-
   // 1. If window is full, block until space frees up
-  while (window.size() >= WINDOW_SIZE)
+  while (window.size() >= effectiveWindowSize())
   {
-    pollAcksAndRetransmit(true);
+    if (!pollAcksAndRetransmit(true)) return false;
   }
 
-  // 2. Add packet to window
-  InFlightPacket pkt;
-  pkt.seq_num = seqNum;
-  pkt.data.assign(data, data + len);
-  pkt.sent_time = std::chrono::steady_clock::now();
-  pkt.acked = false;
-  window.push_back(pkt);
-
-  // 3. Send the packet
+  // 2. Prepare the packet
   RdtPacket rawPkt;
   memset(&rawPkt, 0, sizeof(rawPkt));
   rawPkt.header.seq_num = seqNum;
   rawPkt.header.ack_num = 0;
   rawPkt.header.flags = FLAG_DATA;
-  rawPkt.header.window_size = WINDOW_SIZE;
+  rawPkt.header.window_size = static_cast<uint16_t>(effectiveWindowSize());
   rawPkt.header.payload_len = static_cast<uint16_t>(len);
   rawPkt.header.reserved = 0;
   rawPkt.header.checksum = 0;
@@ -271,11 +426,27 @@ bool RdtSender::sendChunk(uint32_t seqNum, const char *data, size_t len)
   memcpy(tempBuf + HEADER_SIZE, rawPkt.payload, len);
   rawPkt.header.checksum = internetChecksum((const uint8_t *)tempBuf, HEADER_SIZE + len);
 
+#if RDT_DEBUG
   std::cout << "[Sender] Sending seq=" << seqNum << std::endl;
-  sendRawPacket(rawPkt);
+#endif
+
+  std::chrono::steady_clock::time_point actualSendTime;
+  if (!sendRawPacket(rawPkt, actualSendTime)) {
+      return false;
+  }
+
+  // 3. Add packet to window
+  InFlightPacket pkt;
+  pkt.seq_num = seqNum;
+  pkt.data.assign(data, data + len);
+  pkt.sent_time = actualSendTime;
+  pkt.acked = false;
+  pkt.retransmitted = false;
+  pkt.retries = 0;
+  window.push_back(std::move(pkt));
 
   // 4. Quickly check for ACKs before returning
-  pollAcksAndRetransmit(false);
+  if (!pollAcksAndRetransmit(false)) return false;
 
   return true;
 }
@@ -285,7 +456,7 @@ bool RdtSender::flush()
 {
   while (!window.empty())
   {
-    pollAcksAndRetransmit(true);
+    if (!pollAcksAndRetransmit(true)) return false;
   }
   return true;
 }

@@ -3,7 +3,6 @@
 #include "CheckSum.h"
 #include <winsock2.h>
 #include <string>
-#include <unordered_set>
 #include <map>
 
 class RdtReceiver : public IRdtTransport
@@ -11,7 +10,6 @@ class RdtReceiver : public IRdtTransport
 private:
     SOCKET udpSocket;
     sockaddr_in localAddr;
-    std::unordered_set<uint32_t> seen_seq_nums;
     std::map<uint32_t, std::pair<std::vector<char>, bool>> outOfOrderBuffer;
     uint32_t expected_seq = 0;
 
