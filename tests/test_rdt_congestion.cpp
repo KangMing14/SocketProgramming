@@ -1,14 +1,21 @@
-#include <iostream>
-#include <stdexcept>
-#include <thread>
+#include <array>
 #include <chrono>
-#include <vector>
-#include <future>
-#include <string>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <functional>
+#include <future>
+#include <iostream>
+#include <set>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+
 #include <winsock2.h>
 #include <ws2tcpip.h>
+
 #include "RdtSender.h"
 #include "RdtHeader.h"
 #include "CheckSum.h"
@@ -16,409 +23,562 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
+namespace {
+
+using namespace std::chrono_literals;
+
 void require(bool condition, const std::string& message) {
     if (!condition) {
         throw std::runtime_error(message);
     }
 }
 
+std::string socketError(const std::string& operation) {
+    return operation + " failed with Winsock error " +
+           std::to_string(WSAGetLastError());
+}
+
+class WinsockSession {
+public:
+    WinsockSession() {
+        WSADATA data{};
+        const int result = WSAStartup(MAKEWORD(2, 2), &data);
+        if (result != 0) {
+            throw std::runtime_error(
+                "WSAStartup failed with error " + std::to_string(result));
+        }
+    }
+
+    ~WinsockSession() {
+        WSACleanup();
+    }
+
+    WinsockSession(const WinsockSession&) = delete;
+    WinsockSession& operator=(const WinsockSession&) = delete;
+};
+
+class SenderTask {
+public:
+    template <typename Function>
+    explicit SenderTask(Function&& function) {
+        std::packaged_task<bool()> task(std::forward<Function>(function));
+        result_ = task.get_future();
+        thread_ = std::thread(std::move(task));
+    }
+
+    ~SenderTask() {
+        join();
+    }
+
+    bool get() {
+        try {
+            const bool result = result_.get();
+            join();
+            return result;
+        } catch (...) {
+            join();
+            throw;
+        }
+    }
+
+    SenderTask(const SenderTask&) = delete;
+    SenderTask& operator=(const SenderTask&) = delete;
+
+private:
+    void join() noexcept {
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    std::future<bool> result_;
+    std::thread thread_;
+};
+
+}  // namespace
+
 class RdtTestAccess {
 public:
     static void updateRtt(RdtSender& sender, double sampleRttMs) {
         sender.updateRtt(sampleRttMs);
     }
+
     static void applyCongestionDecrease(RdtSender& sender) {
         sender.applyCongestionDecrease();
     }
-    static void setInjectedSendTo(RdtSender& sender, std::function<int(SOCKET, const char*, int, int, const sockaddr*, int)> fn) {
-        sender.injectedSendTo = fn;
+
+    static void setInjectedSendTo(
+        RdtSender& sender,
+        std::function<int(
+            SOCKET,
+            const char*,
+            int,
+            int,
+            const sockaddr*,
+            int)> function) {
+        sender.injectedSendTo = std::move(function);
     }
-    static void setInjectedPreSendDelay(RdtSender& sender, std::function<void()> fn) {
-        sender.injectedPreSendDelay = fn;
+
+    static void setInjectedPreSendDelay(
+        RdtSender& sender,
+        std::function<void()> function) {
+        sender.injectedPreSendDelay = std::move(function);
     }
-    static void setEstimatedRtt(RdtSender& sender, double rtt) {
-        sender.estimatedRttMs = rtt;
+
+    static void setEstimatedRtt(RdtSender& sender, double value) {
+        sender.estimatedRttMs = value;
     }
-    static void setDevRtt(RdtSender& sender, double dev) {
-        sender.devRttMs = dev;
+
+    static void setDevRtt(RdtSender& sender, double value) {
+        sender.devRttMs = value;
     }
 };
+
+namespace {
 
 class MockReceiver {
 public:
-    SOCKET sock;
-    sockaddr_in senderAddr{};
-    int senderLen = sizeof(senderAddr);
+    MockReceiver() {
+        socket_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (socket_ == INVALID_SOCKET) {
+            throw std::runtime_error(socketError("socket"));
+        }
 
-    MockReceiver(uint16_t port) {
-        sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(port);
-        addr.sin_addr.s_addr = INADDR_ANY;
-        bind(sock, (sockaddr*)&addr, sizeof(addr));
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_port = htons(0);
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
-        DWORD timeout = 2000; // 2 seconds
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+        if (bind(
+                socket_,
+                reinterpret_cast<const sockaddr*>(&address),
+                sizeof(address)) == SOCKET_ERROR) {
+            const std::string message = socketError("bind");
+            closesocket(socket_);
+            socket_ = INVALID_SOCKET;
+            throw std::runtime_error(message);
+        }
+
+        int addressLength = sizeof(address);
+        if (getsockname(
+                socket_,
+                reinterpret_cast<sockaddr*>(&address),
+                &addressLength) == SOCKET_ERROR) {
+            const std::string message = socketError("getsockname");
+            closesocket(socket_);
+            socket_ = INVALID_SOCKET;
+            throw std::runtime_error(message);
+        }
+
+        port_ = ntohs(address.sin_port);
+
+        const DWORD timeoutMs = 3000;
+        if (setsockopt(
+                socket_,
+                SOL_SOCKET,
+                SO_RCVTIMEO,
+                reinterpret_cast<const char*>(&timeoutMs),
+                sizeof(timeoutMs)) == SOCKET_ERROR) {
+            const std::string message = socketError("setsockopt");
+            closesocket(socket_);
+            socket_ = INVALID_SOCKET;
+            throw std::runtime_error(message);
+        }
     }
 
     ~MockReceiver() {
-        closesocket(sock);
-    }
-
-    RdtHeader recvPacket() {
-        char buf[HEADER_SIZE + MAX_PAYLOAD];
-        senderLen = sizeof(senderAddr);
-        int n = recvfrom(sock, buf, sizeof(buf), 0, (sockaddr*)&senderAddr, &senderLen);
-        if (n >= HEADER_SIZE) {
-            return deserializeHeader(buf);
+        if (socket_ != INVALID_SOCKET) {
+            closesocket(socket_);
         }
-        // Return dummy packet on timeout
-        RdtHeader dummy{};
-        dummy.seq_num = 0xFFFFFFFF;
-        return dummy;
     }
 
-    void sendAck(uint32_t ackNum) {
-        RdtHeader ackHdr{};
-        ackHdr.seq_num = 0;
-        ackHdr.ack_num = ackNum;
-        ackHdr.flags = FLAG_ACK;
-        ackHdr.window_size = 10;
-        ackHdr.payload_len = 0;
-        ackHdr.reserved = 0;
-        ackHdr.checksum = 0;
+    MockReceiver(const MockReceiver&) = delete;
+    MockReceiver& operator=(const MockReceiver&) = delete;
 
-        char buf[HEADER_SIZE];
-        serializeHeader(ackHdr, buf);
-        ackHdr.checksum = internetChecksum((const uint8_t*)buf, HEADER_SIZE);
-        serializeHeader(ackHdr, buf);
-
-        sendto(sock, buf, HEADER_SIZE, 0, (sockaddr*)&senderAddr, senderLen);
+    uint16_t port() const noexcept {
+        return port_;
     }
+
+    RdtHeader receivePacket() {
+        std::array<char, HEADER_SIZE + MAX_PAYLOAD> buffer{};
+        senderAddressLength_ = sizeof(senderAddress_);
+
+        const int received = recvfrom(
+            socket_,
+            buffer.data(),
+            static_cast<int>(buffer.size()),
+            0,
+            reinterpret_cast<sockaddr*>(&senderAddress_),
+            &senderAddressLength_);
+
+        require(received != SOCKET_ERROR, socketError("recvfrom"));
+        require(received >= static_cast<int>(HEADER_SIZE),
+                "Received an RDT datagram shorter than its header");
+
+        std::vector<char> checksumBuffer(
+            buffer.begin(), buffer.begin() + received);
+        checksumBuffer[13] = 0;
+        checksumBuffer[14] = 0;
+
+        uint16_t receivedChecksum = 0;
+        std::memcpy(&receivedChecksum, buffer.data() + 13, sizeof(receivedChecksum));
+        receivedChecksum = ntohs(receivedChecksum);
+
+        const uint16_t computedChecksum = internetChecksum(
+            reinterpret_cast<const uint8_t*>(checksumBuffer.data()),
+            checksumBuffer.size());
+
+        require(computedChecksum == receivedChecksum,
+                "Received a packet with an invalid checksum");
+
+        return deserializeHeader(buffer.data());
+    }
+
+    void sendAck(uint32_t acknowledgementNumber) {
+        require(senderAddressLength_ > 0,
+                "Cannot send an ACK before receiving a packet");
+
+        RdtHeader acknowledgement{};
+        acknowledgement.ack_num = acknowledgementNumber;
+        acknowledgement.flags = FLAG_ACK;
+        acknowledgement.window_size = 10;
+
+        std::array<char, HEADER_SIZE> buffer{};
+        serializeHeader(acknowledgement, buffer.data());
+        acknowledgement.checksum = internetChecksum(
+            reinterpret_cast<const uint8_t*>(buffer.data()), buffer.size());
+        serializeHeader(acknowledgement, buffer.data());
+
+        const int sent = sendto(
+            socket_,
+            buffer.data(),
+            static_cast<int>(buffer.size()),
+            0,
+            reinterpret_cast<const sockaddr*>(&senderAddress_),
+            senderAddressLength_);
+
+        require(sent == static_cast<int>(buffer.size()), socketError("sendto"));
+    }
+
+private:
+    SOCKET socket_ = INVALID_SOCKET;
+    uint16_t port_ = 0;
+    sockaddr_in senderAddress_{};
+    int senderAddressLength_ = 0;
 };
 
-void test_additive_increase() {
-    MockReceiver receiver(9001);
-    RdtSender sender("127.0.0.1", 9001, 50);
+void testAdditiveIncrease() {
+    MockReceiver receiver;
+    RdtSender sender("127.0.0.1", receiver.port(), 50);
 
-    require(sender.getCongestionWindow() == 4.0, "Initial cwnd should be 4.0");
-    
-    std::promise<bool> p;
-    std::thread senderThread([&]() {
-        bool ok = true;
-        for (int i = 0; i < 4; ++i) {
-            ok = ok && sender.sendChunk(i, "a", 1);
+    require(sender.getCongestionWindow() == 4.0,
+            "Initial cwnd should be 4.0");
+
+    SenderTask task([&]() {
+        for (uint32_t sequence = 0; sequence < 4; ++sequence) {
+            if (!sender.sendChunk(sequence, "a", 1)) {
+                return false;
+            }
         }
-        p.set_value(ok && sender.flush());
+        return sender.flush();
     });
 
     for (int i = 0; i < 4; ++i) {
-        RdtHeader hdr = receiver.recvPacket();
-        receiver.sendAck(hdr.seq_num);
+        const RdtHeader header = receiver.receivePacket();
+        receiver.sendAck(header.seq_num);
     }
 
-    require(p.get_future().get(), "Sender thread failed");
-    senderThread.join();
-    
-    require(sender.getCongestionWindow() == 5.0, "cwnd should be 5.0");
-    require(sender.getCleanAckCount() == 0, "cleanAcks should be 0");
-    std::cout << "[PASS] test_additive_increase\n";
+    require(task.get(), "Sender failed during additive-increase test");
+    require(sender.getCongestionWindow() == 5.0,
+            "Four clean ACKs should increase cwnd from 4.0 to 5.0");
+    require(sender.getCleanAckCount() == 0,
+            "cleanAcks should reset after cwnd grows");
+
+    std::cout << "[PASS] additive increase\n";
 }
 
-void test_duplicate_ack_protection() {
-    MockReceiver receiver(9002);
-    RdtSender sender("127.0.0.1", 9002, 500);
+void testDuplicateAckProtection() {
+    MockReceiver receiver;
+    RdtSender sender("127.0.0.1", receiver.port(), 500);
 
-    require(sender.getCongestionWindow() == 4.0, "Initial cwnd should be 4.0");
-
-    std::promise<bool> p;
-    std::thread senderThread([&]() {
-        bool s1 = sender.sendChunk(0, "a", 1);
-        bool s2 = sender.sendChunk(1, "b", 1);
-        p.set_value(s1 && s2 && sender.flush());
+    SenderTask task([&]() {
+        return sender.sendChunk(0, "a", 1) &&
+               sender.sendChunk(1, "b", 1) &&
+               sender.flush();
     });
 
-    RdtHeader hdr1 = receiver.recvPacket();
-    RdtHeader hdr2 = receiver.recvPacket();
-    require(hdr1.seq_num != 0xFFFFFFFF && hdr2.seq_num != 0xFFFFFFFF, "Did not receive both packets");
+    const RdtHeader first = receiver.receivePacket();
+    const RdtHeader second = receiver.receivePacket();
+    require(first.seq_num != second.seq_num,
+            "The sender should transmit two distinct sequence numbers");
 
-    receiver.sendAck(hdr1.seq_num);
-    
-    // Duplicate ACKs
-    receiver.sendAck(hdr1.seq_num);
-    receiver.sendAck(hdr1.seq_num);
+    receiver.sendAck(first.seq_num);
+    receiver.sendAck(first.seq_num);
+    receiver.sendAck(first.seq_num);
+    receiver.sendAck(second.seq_num);
 
-    receiver.sendAck(hdr2.seq_num);
+    require(task.get(), "Sender failed during duplicate-ACK test");
+    require(sender.getCleanAckCount() == 2,
+            "Duplicate ACKs must not increment cleanAcks");
+    require(sender.getCongestionWindow() == 4.0,
+            "Duplicate ACKs must not grow cwnd");
 
-    require(p.get_future().get(), "Sender thread failed");
-    senderThread.join();
-    
-    require(sender.getCleanAckCount() == 2, "cleanAcks should be 2");
-    require(sender.getCongestionWindow() == 4.0, "cwnd should remain 4.0");
-    std::cout << "[PASS] test_duplicate_ack_protection\n";
+    std::cout << "[PASS] duplicate ACK protection\n";
 }
 
-void test_multiplicative_decrease() {
-    MockReceiver receiver(9003);
-    RdtSender sender("127.0.0.1", 9003, 50);
+void testMultiplicativeDecrease() {
+    MockReceiver receiver;
+    RdtSender sender("127.0.0.1", receiver.port(), 50);
 
-    std::promise<bool> p;
-    std::thread senderThread([&]() {
-        p.set_value(sender.sendChunk(0, "a", 1) && sender.flush());
+    SenderTask task([&]() {
+        return sender.sendChunk(0, "a", 1) && sender.flush();
     });
 
-    // Receive first packet, ignore it to cause timeout
-    receiver.recvPacket();
-    
-    // Receive retransmission
-    RdtHeader hdr2 = receiver.recvPacket();
-    if (hdr2.seq_num != 0xFFFFFFFF) {
-        receiver.sendAck(hdr2.seq_num);
+    receiver.receivePacket();
+    const RdtHeader retransmission = receiver.receivePacket();
+    receiver.sendAck(retransmission.seq_num);
+
+    require(task.get(), "Sender failed after one controlled timeout");
+    require(sender.getCongestionWindow() == 2.0,
+            "One timeout should reduce cwnd from 4.0 to 2.0");
+
+    std::cout << "[PASS] multiplicative decrease\n";
+}
+
+void testConcurrentTimeoutsCauseOneDecrease() {
+    MockReceiver receiver;
+    RdtSender sender("127.0.0.1", receiver.port(), 50);
+
+    SenderTask task([&]() {
+        return sender.sendChunk(0, "a", 1) &&
+               sender.sendChunk(1, "b", 1) &&
+               sender.sendChunk(2, "c", 1) &&
+               sender.flush();
+    });
+
+    std::set<uint32_t> initialSequences;
+    for (int i = 0; i < 3; ++i) {
+        initialSequences.insert(receiver.receivePacket().seq_num);
     }
-    
-    require(p.get_future().get(), "Sender thread failed");
-    senderThread.join();
+    require(initialSequences.size() == 3,
+            "Expected three distinct initial packets");
 
-    require(sender.getCongestionWindow() == 2.0, "Expected cwnd 2.0");
-    std::cout << "[PASS] test_multiplicative_decrease\n";
-}
-
-void test_concurrent_timeouts() {
-    MockReceiver receiver(9004);
-    RdtSender sender("127.0.0.1", 9004, 50);
-
-    std::promise<bool> p;
-    std::thread senderThread([&]() {
-        bool ok = sender.sendChunk(0, "a", 1);
-        ok = ok && sender.sendChunk(1, "b", 1);
-        ok = ok && sender.sendChunk(2, "c", 1);
-        p.set_value(ok && sender.flush());
-    });
-
-    // Receive 3 initial packets, ignore all to cause concurrent timeouts
-    receiver.recvPacket();
-    receiver.recvPacket();
-    receiver.recvPacket();
-
-    // Receive retransmissions
-    for (int i=0; i<10; i++) {
-        RdtHeader r = receiver.recvPacket();
-        if (r.seq_num != 0xFFFFFFFF) {
-            receiver.sendAck(r.seq_num);
-        } else {
-            break;
-        }
+    std::set<uint32_t> retransmittedSequences;
+    for (int i = 0; i < 3; ++i) {
+        const RdtHeader retransmission = receiver.receivePacket();
+        retransmittedSequences.insert(retransmission.seq_num);
+        receiver.sendAck(retransmission.seq_num);
     }
 
-    require(p.get_future().get(), "Sender thread failed");
-    senderThread.join();
+    require(task.get(), "Sender failed during concurrent-timeout test");
+    require(retransmittedSequences == initialSequences,
+            "Every expired packet should be retransmitted exactly once");
+    require(sender.getCongestionWindow() == 2.0,
+            "One polling cycle must halve cwnd only once");
 
-    require(sender.getCongestionWindow() == 2.0, "Expected cwnd 2.0 (concurrent)");
-    std::cout << "[PASS] test_concurrent_timeouts\n";
+    std::cout << "[PASS] concurrent timeouts cause one decrease\n";
 }
 
-void test_minimum_congestion_window() {
-    MockReceiver receiver(9005);
-    RdtSender sender("127.0.0.1", 9005, 50);
+void testMinimumCongestionWindow() {
+    MockReceiver receiver;
+    RdtSender sender("127.0.0.1", receiver.port(), 50);
 
-    std::promise<bool> p;
-    std::thread senderThread([&]() {
-        p.set_value(sender.sendChunk(0, "a", 1) && sender.flush());
+    SenderTask task([&]() {
+        return sender.sendChunk(0, "a", 1) && sender.flush();
     });
 
-    // 1st transmission (ignore) -> triggers timeout, cwnd 4->2
-    receiver.recvPacket();
-    
-    // 2nd transmission (ignore) -> triggers timeout, cwnd 2->1
-    receiver.recvPacket();
-    
-    // 3rd transmission (ignore) -> triggers timeout, cwnd 1->1
-    receiver.recvPacket();
+    receiver.receivePacket();
+    receiver.receivePacket();
+    receiver.receivePacket();
 
-    // 4th transmission (ACK it)
-    RdtHeader r4 = receiver.recvPacket();
-    if (r4.seq_num != 0xFFFFFFFF) {
-        receiver.sendAck(r4.seq_num);
-    }
+    const RdtHeader finalRetransmission = receiver.receivePacket();
+    receiver.sendAck(finalRetransmission.seq_num);
 
-    require(p.get_future().get(), "Sender thread failed");
-    senderThread.join();
+    require(task.get(), "Sender failed while testing minimum cwnd");
+    require(sender.getCongestionWindow() == 1.0,
+            "cwnd must never fall below 1.0");
 
-    require(sender.getCongestionWindow() == 1.0, "cwnd should be 1.0");
-    std::cout << "[PASS] test_minimum_congestion_window\n";
+    std::cout << "[PASS] minimum congestion window\n";
 }
 
-void test_jacobson_karels() {
-    RdtSender sender("127.0.0.1", 9000, 500); 
+void testJacobsonKarelsEstimator() {
+    RdtSender sender("127.0.0.1", 9, 500);
     RdtTestAccess::setEstimatedRtt(sender, 500.0);
     RdtTestAccess::setDevRtt(sender, 0.0);
-    
+
     RdtTestAccess::updateRtt(sender, 100.0);
-    
-    require(std::abs(sender.getDevRttMs() - 100.0) < 0.001, "DevRTT mismatch");
-    require(std::abs(sender.getEstimatedRttMs() - 450.0) < 0.001, "EstimatedRTT mismatch");
-    require(sender.getTimeoutMs() == 850, "RTO mismatch");
-    std::cout << "[PASS] test_jacobson_karels\n";
+
+    require(std::abs(sender.getDevRttMs() - 100.0) < 0.001,
+            "DevRTT should use the previous EstimatedRTT");
+    require(std::abs(sender.getEstimatedRttMs() - 450.0) < 0.001,
+            "EstimatedRTT does not match the Jacobson/Karels formula");
+    require(sender.getTimeoutMs() == 850,
+            "RTO should equal ceil(EstimatedRTT + 4 * DevRTT)");
+
+    std::cout << "[PASS] Jacobson/Karels estimator\n";
 }
 
-void test_rto_lower_bound() {
-    RdtSender sender("127.0.0.1", 9000, 500);
-    for(int i=0; i<100; i++) {
+void testRtoLowerBound() {
+    RdtSender sender("127.0.0.1", 9, 500);
+    for (int i = 0; i < 100; ++i) {
         RdtTestAccess::updateRtt(sender, 1.0);
     }
-    require(sender.getTimeoutMs() == 50, "RTO did not clamp to lower bound");
-    std::cout << "[PASS] test_rto_lower_bound\n";
+
+    require(sender.getTimeoutMs() == 50,
+            "RTO should clamp to the 50 ms lower bound");
+    std::cout << "[PASS] RTO lower bound\n";
 }
 
-void test_rto_upper_bound() {
-    RdtSender sender("127.0.0.1", 9000, 500);
+void testRtoUpperBound() {
+    RdtSender sender("127.0.0.1", 9, 500);
     RdtTestAccess::updateRtt(sender, 10000.0);
-    require(sender.getTimeoutMs() == 2000, "RTO did not clamp to upper bound");
-    std::cout << "[PASS] test_rto_upper_bound\n";
+
+    require(sender.getTimeoutMs() == 2000,
+            "RTO should clamp to the 2000 ms upper bound");
+    std::cout << "[PASS] RTO upper bound\n";
 }
 
-void test_exponential_backoff() {
-    RdtSender sender("127.0.0.1", 9000, 50);
-    
-    require(sender.getTimeoutMs() == 50, "Initial RTO mismatch");
-    RdtTestAccess::applyCongestionDecrease(sender);
-    require(sender.getTimeoutMs() == 100, "Backoff 1 mismatch");
-    RdtTestAccess::applyCongestionDecrease(sender);
-    require(sender.getTimeoutMs() == 200, "Backoff 2 mismatch");
-    RdtTestAccess::applyCongestionDecrease(sender);
-    require(sender.getTimeoutMs() == 400, "Backoff 3 mismatch");
-    RdtTestAccess::applyCongestionDecrease(sender);
-    require(sender.getTimeoutMs() == 800, "Backoff 4 mismatch");
-    RdtTestAccess::applyCongestionDecrease(sender);
-    require(sender.getTimeoutMs() == 1600, "Backoff 5 mismatch");
-    RdtTestAccess::applyCongestionDecrease(sender);
-    require(sender.getTimeoutMs() == 2000, "Backoff 6 mismatch");
-    RdtTestAccess::applyCongestionDecrease(sender);
-    require(sender.getTimeoutMs() == 2000, "Backoff 7 mismatch");
-    std::cout << "[PASS] test_exponential_backoff\n";
-}
+void testExponentialBackoff() {
+    RdtSender sender("127.0.0.1", 9, 50);
+    const std::vector<int> expectedTimeouts{
+        100, 200, 400, 800, 1600, 2000, 2000};
 
-void test_karns_algorithm() {
-    MockReceiver receiver(9006);
-    RdtSender sender("127.0.0.1", 9006, 50);
-
-    double initialEst = sender.getEstimatedRttMs();
-    double initialDev = sender.getDevRttMs();
-
-    std::promise<bool> p;
-    std::thread senderThread([&]() {
-        p.set_value(sender.sendChunk(0, "a", 1) && sender.flush());
-    });
-
-    receiver.recvPacket(); // Ignore first
-    RdtHeader r1_retry = receiver.recvPacket(); // Receive retry
-    
-    int backedOffTimeout = sender.getTimeoutMs();
-    require(backedOffTimeout == 100, "Timeout should back off");
-
-    if (r1_retry.seq_num != 0xFFFFFFFF) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        receiver.sendAck(r1_retry.seq_num);
+    require(sender.getTimeoutMs() == 50, "Initial RTO should be 50 ms");
+    for (const int expectedTimeout : expectedTimeouts) {
+        RdtTestAccess::applyCongestionDecrease(sender);
+        require(
+            sender.getTimeoutMs() == expectedTimeout,
+            "Unexpected backoff value: expected " +
+                std::to_string(expectedTimeout) + " ms, got " +
+                std::to_string(sender.getTimeoutMs()) + " ms");
     }
 
-    require(p.get_future().get(), "Sender failed");
-    senderThread.join();
-
-    require(sender.getEstimatedRttMs() == initialEst, "EstimatedRTT changed");
-    require(sender.getDevRttMs() == initialDev, "DevRTT changed");
-    require(sender.getTimeoutMs() == backedOffTimeout, "Timeout changed after retransmitted ACK");
-
-    std::cout << "[PASS] test_karns_algorithm\n";
+    std::cout << "[PASS] exponential backoff\n";
 }
 
-void test_retransmission_failure_propagation() {
-    MockReceiver receiver(9007);
-    RdtSender sender("127.0.0.1", 9007, 50);
+void testKarnsAlgorithm() {
+    MockReceiver receiver;
+    RdtSender sender("127.0.0.1", receiver.port(), 50);
+
+    const double initialEstimatedRtt = sender.getEstimatedRttMs();
+    const double initialDevRtt = sender.getDevRttMs();
+
+    SenderTask task([&]() {
+        return sender.sendChunk(0, "a", 1) && sender.flush();
+    });
+
+    receiver.receivePacket();
+    const RdtHeader retransmission = receiver.receivePacket();
+    receiver.sendAck(retransmission.seq_num);
+
+    require(task.get(), "Sender failed during Karn test");
+
+    // Read sender state only after the sender thread has joined. This avoids
+    // the data race that existed in the previous version of this test.
+    require(sender.getEstimatedRttMs() == initialEstimatedRtt,
+            "A retransmitted packet must not update EstimatedRTT");
+    require(sender.getDevRttMs() == initialDevRtt,
+            "A retransmitted packet must not update DevRTT");
+    require(sender.getTimeoutMs() == 100,
+            "The retransmitted ACK must preserve the backed-off RTO");
+
+    std::cout << "[PASS] Karn's algorithm\n";
+}
+
+void testRetransmissionFailurePropagation() {
+    MockReceiver receiver;
+    RdtSender sender("127.0.0.1", receiver.port(), 50);
 
     int sendCount = 0;
-    RdtTestAccess::setInjectedSendTo(sender, [&](SOCKET s, const char* buf, int len, int flags, const sockaddr* to, int tolen) {
-        sendCount++;
-        if (sendCount == 2) {
-            WSASetLastError(WSAECONNRESET);
-            return -1; // SOCKET_ERROR
-        }
-        return sendto(s, buf, len, flags, to, tolen);
+    RdtTestAccess::setInjectedSendTo(
+        sender,
+        [&](SOCKET socketHandle,
+            const char* buffer,
+            int length,
+            int flags,
+            const sockaddr* destination,
+            int destinationLength) {
+            ++sendCount;
+            if (sendCount == 2) {
+                WSASetLastError(WSAECONNRESET);
+                return SOCKET_ERROR;
+            }
+            return sendto(
+                socketHandle,
+                buffer,
+                length,
+                flags,
+                destination,
+                destinationLength);
+        });
+
+    SenderTask task([&]() {
+        return sender.sendChunk(0, "a", 1) && sender.flush();
     });
 
-    std::promise<bool> p;
-    std::thread senderThread([&]() {
-        p.set_value(sender.sendChunk(0, "a", 1) && sender.flush());
-    });
+    receiver.receivePacket();
 
-    receiver.recvPacket(); // Receive and ignore first packet to cause timeout
-    
-    bool success = p.get_future().get();
-    senderThread.join();
+    require(!task.get(),
+            "A retransmission send failure must propagate to the caller");
+    require(sendCount == 2,
+            "The sender should stop immediately after the failed retransmission");
 
-    require(!success, "Sender should have failed");
-    require(sendCount == 2, "Should have attempted exactly 2 sends");
-    std::cout << "[PASS] test_retransmission_failure_propagation\n";
+    std::cout << "[PASS] retransmission failure propagation\n";
 }
 
-void test_initial_timestamp() {
-    MockReceiver receiver(9008);
-    RdtSender sender("127.0.0.1", 9008, 500);
+void testInitialTimestampExcludesPreSendDelay() {
+    MockReceiver receiver;
+    RdtSender sender("127.0.0.1", receiver.port(), 500);
 
-    RdtTestAccess::setInjectedPreSendDelay(sender, [&]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    RdtTestAccess::setInjectedPreSendDelay(sender, []() {
+        std::this_thread::sleep_for(250ms);
     });
 
-    std::promise<bool> p;
-    std::thread senderThread([&]() {
-        p.set_value(sender.sendChunk(0, "a", 1) && sender.flush());
+    SenderTask task([&]() {
+        return sender.sendChunk(0, "a", 1) && sender.flush();
     });
 
-    RdtHeader hdr = receiver.recvPacket();
-    receiver.sendAck(hdr.seq_num);
+    const RdtHeader packet = receiver.receivePacket();
+    receiver.sendAck(packet.seq_num);
 
-    require(p.get_future().get(), "Sender failed");
-    senderThread.join();
+    require(task.get(), "Sender failed during timestamp test");
 
-    double newEst = sender.getEstimatedRttMs();
-    double inferredSample = (newEst - 0.875 * 500.0) / 0.125;
-    require(inferredSample < 100.0, "RTT sample included pre-send delay: " + std::to_string(inferredSample));
+    const double inferredSampleRtt =
+        (sender.getEstimatedRttMs() - 0.875 * 500.0) / 0.125;
 
-    std::cout << "[PASS] test_initial_timestamp\n";
+    require(inferredSampleRtt >= 0.0,
+            "Inferred SampleRTT must not be negative");
+    require(inferredSampleRtt < 175.0,
+            "SampleRTT appears to include the injected 250 ms pre-send delay");
+
+    std::cout << "[PASS] initial timestamp excludes pre-send delay\n";
 }
+
+}  // namespace
 
 int main() {
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        std::cerr << "WSAStartup failed\n";
-        return 1;
-    }
-
     try {
+        WinsockSession winsock;
+
         std::cout << "--- RDT Congestion Tests ---\n\n";
 
-        test_additive_increase();
-        test_duplicate_ack_protection();
-        test_multiplicative_decrease();
-        test_concurrent_timeouts();
-        test_minimum_congestion_window();
-        
-        test_jacobson_karels();
-        test_rto_lower_bound();
-        test_rto_upper_bound();
-        test_exponential_backoff();
-        test_karns_algorithm();
-        
-        test_retransmission_failure_propagation();
-        test_initial_timestamp();
+        testAdditiveIncrease();
+        testDuplicateAckProtection();
+        testMultiplicativeDecrease();
+        testConcurrentTimeoutsCauseOneDecrease();
+        testMinimumCongestionWindow();
+        testJacobsonKarelsEstimator();
+        testRtoLowerBound();
+        testRtoUpperBound();
+        testExponentialBackoff();
+        testKarnsAlgorithm();
+        testRetransmissionFailurePropagation();
+        testInitialTimestampExcludesPreSendDelay();
 
-        std::cout << "\nAll congestion tests PASSED!\n";
-    } catch (const std::exception& ex) {
-        std::cerr << "[FAIL] " << ex.what() << '\n';
-        WSACleanup();
+        std::cout << "\nAll RDT congestion tests passed.\n";
+        return 0;
+    } catch (const std::exception& exception) {
+        std::cerr << "[FAIL] " << exception.what() << '\n';
         return 1;
     }
-
-    WSACleanup();
-    return 0;
 }
