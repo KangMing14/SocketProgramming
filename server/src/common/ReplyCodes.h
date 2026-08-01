@@ -9,6 +9,7 @@ namespace ReplyCode {
     constexpr int FileStatus = 213;
     constexpr int ServiceReady = 220;
     constexpr int Goodbye = 221;
+    constexpr int EnterPasvMode = 227;
     constexpr int LoggedIn = 230;           // PASS success
     constexpr int ActionCompleted = 250;
     constexpr int PathnameCreated = 257;    // PWD, MKD

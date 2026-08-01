@@ -150,7 +150,7 @@ namespace CommandDispatcher{
             uint32_t serverIp = ntohl(localAddr.sin_addr.s_addr);
 
             std::string body = formatPasvReply(serverIp, port);
-            Session::replyWithCode(s.socket, 227, "Entering Passive Mode (" + body + ").");
+            Session::replyWithCode(s.socket, ReplyCode::EnterPasvMode, "Entering Passive Mode (" + body + ").");
         } },
 
         { "PORT", [](ClientSession& s, const std::vector<std::string>& args) {
