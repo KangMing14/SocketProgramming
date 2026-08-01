@@ -4,10 +4,13 @@
 #include <cstdlib>
 #include <chrono>
 #include <thread>
+#include <algorithm>
+#include <cmath>
 
 #include "../common/ProtocolConstants.h"
 
 #define MAX_RETRIES 10
+#define RDT_DEBUG 0
 
 // ---- CHAOS MODE ----
 // Set to 1 to inject artificial network faults for testing reliability.
@@ -24,8 +27,12 @@
 // Constructor: creates the UDP socket, sets timeout, and saves the destination
 // address
 RdtSender::RdtSender(const std::string &targetIp, uint16_t targetPort,
-                     int timeoutMs)
-    : timeoutMs(timeoutMs)
+                     int initialTimeoutMs)
+    : timeoutMs(std::clamp(initialTimeoutMs, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS)),
+      estimatedRttMs(timeoutMs),
+      devRttMs(0.0),
+      cwnd(INITIAL_CWND),
+      cleanAcks(0)
 {
   // Step 1: Create a UDP (SOCK_DGRAM) socket
   udpSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -52,8 +59,13 @@ RdtSender::RdtSender(const std::string &targetIp, uint16_t targetPort,
 
 // Constructor for PASV mode: reuses an already-bound socket owned by the
 // server's PassiveModeHandler. Does NOT call socket() or connect().
-RdtSender::RdtSender(SOCKET existingSocket, int timeoutMs)
-    : timeoutMs(timeoutMs), udpSocket(existingSocket)
+RdtSender::RdtSender(SOCKET existingSocket, int initialTimeoutMs)
+    : udpSocket(existingSocket),
+      timeoutMs(std::clamp(initialTimeoutMs, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS)),
+      estimatedRttMs(timeoutMs),
+      devRttMs(0.0),
+      cwnd(INITIAL_CWND),
+      cleanAcks(0)
 {
   memset(&destAddr, 0, sizeof(destAddr));
   // Just apply the timeout — everything else is already set up by the caller.
@@ -70,6 +82,51 @@ RdtSender::~RdtSender()
   {
     closesocket(udpSocket);
   }
+}
+
+size_t RdtSender::effectiveWindowSize() const {
+    return std::max<size_t>(
+        1,
+        static_cast<size_t>(std::floor(cwnd))
+    );
+}
+
+void RdtSender::updateRtt(double sampleRttMs) {
+    const double previousEstimatedRtt = estimatedRttMs;
+
+    devRttMs =
+        (1.0 - RTT_BETA) * devRttMs +
+        RTT_BETA *
+            std::abs(sampleRttMs - previousEstimatedRtt);
+
+    estimatedRttMs =
+        (1.0 - RTT_ALPHA) * estimatedRttMs +
+        RTT_ALPHA * sampleRttMs;
+
+    timeoutMs = std::clamp(
+        static_cast<int>(std::ceil(
+            estimatedRttMs + 4.0 * devRttMs
+        )),
+        MIN_TIMEOUT_MS,
+        MAX_TIMEOUT_MS
+    );
+}
+
+void RdtSender::applyCongestionDecrease() {
+    double previousCwnd = cwnd;
+    cwnd = std::max(MIN_CWND, cwnd / 2.0);
+    cleanAcks = 0;
+
+    timeoutMs = std::clamp(
+        timeoutMs * 2,
+        MIN_TIMEOUT_MS,
+        MAX_TIMEOUT_MS
+    );
+#ifdef RDT_DEBUG
+    std::cerr << "[RDT] Congestion event: cwnd "
+              << previousCwnd << " -> " << cwnd
+              << ", RTO=" << timeoutMs << "ms\n";
+#endif
 }
 
 // PRIVATE HELPER: Physically serialize and shoot one packet into the network
@@ -182,9 +239,36 @@ bool RdtSender::pollAcksAndRetransmit(bool blocking)
             // Find the packet in the window and mark it acked
             for (auto &pkt : window)
             {
-              if (pkt.seq_num == ackHeader.ack_num)
+              if (pkt.seq_num == ackHeader.ack_num && !pkt.acked)
               {
                 pkt.acked = true;
+
+                if (!pkt.retransmitted) {
+                    const auto ackTime = std::chrono::steady_clock::now();
+                    const double sampleRttMs =
+                        std::chrono::duration<double, std::milli>(
+                            ackTime - pkt.sent_time
+                        ).count();
+
+                    updateRtt(sampleRttMs);
+                    cleanAcks++;
+
+                    if (cleanAcks >= effectiveWindowSize()) {
+                        cwnd += 1.0;
+                        cleanAcks = 0;
+                    }
+
+#ifdef RDT_DEBUG
+                    std::cout
+                        << "[RDT] ACK seq=" << pkt.seq_num
+                        << " SampleRTT=" << sampleRttMs << "ms"
+                        << " EstimatedRTT=" << estimatedRttMs << "ms"
+                        << " DevRTT=" << devRttMs << "ms"
+                        << " RTO=" << timeoutMs << "ms"
+                        << " cwnd=" << cwnd
+                        << '\n';
+#endif
+                }
                 break;
               }
             }
@@ -209,12 +293,31 @@ bool RdtSender::pollAcksAndRetransmit(bool blocking)
 
   // Check for retransmissions
   auto now = std::chrono::steady_clock::now();
+  bool congestionEvent = false;
+  int currentTimeoutMs = timeoutMs;
+
   for (auto &pkt : window)
   {
     if (!pkt.acked)
     {
       auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - pkt.sent_time).count();
-      if (duration > timeoutMs)
+      if (duration > currentTimeoutMs)
+      {
+        congestionEvent = true;
+      }
+    }
+  }
+
+  if (congestionEvent) {
+    applyCongestionDecrease();
+  }
+
+  for (auto &pkt : window)
+  {
+    if (!pkt.acked)
+    {
+      auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - pkt.sent_time).count();
+      if (duration > currentTimeoutMs)
       {
         pkt.retries++;
         if (pkt.retries >= MAX_RETRIES)
@@ -231,7 +334,7 @@ bool RdtSender::pollAcksAndRetransmit(bool blocking)
         rawPkt.header.seq_num = pkt.seq_num;
         rawPkt.header.ack_num = 0;
         rawPkt.header.flags = FLAG_DATA;
-        rawPkt.header.window_size = 10;
+        rawPkt.header.window_size = static_cast<uint16_t>(effectiveWindowSize());
         rawPkt.header.payload_len = static_cast<uint16_t>(pkt.data.size());
         rawPkt.header.reserved = 0;
         rawPkt.header.checksum = 0;
@@ -244,7 +347,8 @@ bool RdtSender::pollAcksAndRetransmit(bool blocking)
         rawPkt.header.checksum = internetChecksum((const uint8_t *)tempBuf, HEADER_SIZE + pkt.data.size());
 
         sendRawPacket(rawPkt);
-        pkt.sent_time = now; // Reset timer
+        pkt.sent_time = std::chrono::steady_clock::now(); // Reset timer AFTER sleep
+        pkt.retransmitted = true;
       }
     }
   }
@@ -254,8 +358,6 @@ bool RdtSender::pollAcksAndRetransmit(bool blocking)
 // PUBLIC: High-level Selective Repeat send
 bool RdtSender::sendChunk(uint32_t seqNum, const char *data, size_t len)
 {
-  const int WINDOW_SIZE = 10;
-
   if (len > MAX_PAYLOAD)
   {
     std::cerr << "[Sender] REJECTED: chunk length " << len
@@ -264,7 +366,7 @@ bool RdtSender::sendChunk(uint32_t seqNum, const char *data, size_t len)
   }
 
   // 1. If window is full, block until space frees up
-  while (window.size() >= WINDOW_SIZE)
+  while (window.size() >= effectiveWindowSize())
   {
     if (!pollAcksAndRetransmit(true)) return false;
   }
@@ -275,6 +377,7 @@ bool RdtSender::sendChunk(uint32_t seqNum, const char *data, size_t len)
   pkt.data.assign(data, data + len);
   pkt.sent_time = std::chrono::steady_clock::now();
   pkt.acked = false;
+  pkt.retransmitted = false;
   pkt.retries = 0;
   window.push_back(pkt);
 
@@ -284,7 +387,7 @@ bool RdtSender::sendChunk(uint32_t seqNum, const char *data, size_t len)
   rawPkt.header.seq_num = seqNum;
   rawPkt.header.ack_num = 0;
   rawPkt.header.flags = FLAG_DATA;
-  rawPkt.header.window_size = WINDOW_SIZE;
+  rawPkt.header.window_size = static_cast<uint16_t>(effectiveWindowSize());
   rawPkt.header.payload_len = static_cast<uint16_t>(len);
   rawPkt.header.reserved = 0;
   rawPkt.header.checksum = 0;

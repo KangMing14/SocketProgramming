@@ -12,9 +12,21 @@
 class RdtSender : public IRdtTransport
 {
 private:
+  static constexpr double RTT_ALPHA = 0.125;
+  static constexpr double RTT_BETA = 0.25;
+  static constexpr int MIN_TIMEOUT_MS = 50;
+  static constexpr int MAX_TIMEOUT_MS = 2000;
+  static constexpr double MIN_CWND = 1.0;
+  static constexpr double INITIAL_CWND = 4.0;
+
   SOCKET udpSocket;
   sockaddr_in destAddr;
   int timeoutMs;
+
+  double estimatedRttMs;
+  double devRttMs;
+  double cwnd;
+  size_t cleanAcks;
 
   // Helper to physically send the packet
   void sendRawPacket(const RdtPacket &packet);
@@ -24,10 +36,15 @@ private:
       std::vector<char> data;
       std::chrono::steady_clock::time_point sent_time;
       bool acked;
+      bool retransmitted;
       int retries;
   };
   
   std::deque<InFlightPacket> window;
+
+  size_t effectiveWindowSize() const;
+  void updateRtt(double sampleRttMs);
+  void applyCongestionDecrease();
 
   // Helper to poll ACKs non-blockingly (or blockingly) and retransmit
   bool pollAcksAndRetransmit(bool blocking);
@@ -35,11 +52,11 @@ private:
 public:
   // Constructor: creates its own UDP socket and sets the destination
   RdtSender(const std::string &targetIp, uint16_t targetPort,
-            int timeoutMs = 500);
+            int initialTimeoutMs = 500);
 
   // Constructor for PASV mode: reuses an already-bound socket (no socket/bind called).
   // Use this when the server's PassiveModeHandler already owns the socket.
-  RdtSender(SOCKET existingSocket, int timeoutMs = 500);
+  RdtSender(SOCKET existingSocket, int initialTimeoutMs = 500);
 
   // Destructor closes the socket
   ~RdtSender();
