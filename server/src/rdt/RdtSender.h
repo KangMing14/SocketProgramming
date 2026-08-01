@@ -29,7 +29,7 @@ private:
   size_t cleanAcks;
 
   // Helper to physically send the packet
-  void sendRawPacket(const RdtPacket &packet);
+  bool sendRawPacket(const RdtPacket &packet, std::chrono::steady_clock::time_point &outSendTime);
 
   struct InFlightPacket {
       uint32_t seq_num;
@@ -50,6 +50,13 @@ private:
   bool pollAcksAndRetransmit(bool blocking);
 
 public:
+  // Testability accessors
+  double getCongestionWindow() const noexcept;
+  int getTimeoutMs() const noexcept;
+  double getEstimatedRttMs() const noexcept;
+  double getDevRttMs() const noexcept;
+  size_t getCleanAckCount() const noexcept;
+
   // Constructor: creates its own UDP socket and sets the destination
   RdtSender(const std::string &targetIp, uint16_t targetPort,
             int initialTimeoutMs = 500);
