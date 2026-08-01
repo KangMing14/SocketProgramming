@@ -1,5 +1,7 @@
 #include "AsciiTranslator.h"
 
+namespace hybridftp::client {
+
 std::vector<char> AsciiTranslator::normalizeToCRLF(const std::vector<char>& in, bool& carryPrevCR) {
     std::vector<char> out;
     out.reserve(in.size() + in.size() / 8);   // headroom guess; grows automatically if needed
@@ -27,4 +29,6 @@ std::vector<char> AsciiTranslator::encode(const std::vector<char>& raw) {
 std::vector<char> AsciiTranslator::decode(const std::vector<char>& wire) {
     // Windows only, need modify for other OS
     return normalizeToCRLF(wire, decodeCarryCR);
+}
+
 }

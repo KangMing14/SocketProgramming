@@ -1,5 +1,9 @@
 #include "AsciiChunkedReader.h"
 
+#include <algorithm>
+
+namespace hybridftp::client {
+
 AsciiChunkedReader::AsciiChunkedReader(const std::filesystem::path& filePath) : reader(filePath) {}
 
 bool AsciiChunkedReader::isOpen() const { return reader.isOpen(); }
@@ -18,4 +22,6 @@ bool AsciiChunkedReader::nextChunk(std::vector<char>& chunk) {
     chunk.assign(pendingOutput.begin(), pendingOutput.begin() + take);
     pendingOutput.erase(pendingOutput.begin(), pendingOutput.begin() + take);
     return true;
+}
+
 }

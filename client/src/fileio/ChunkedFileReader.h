@@ -8,6 +8,8 @@
 
 namespace fs = std::filesystem;
 
+namespace hybridftp::client {
+
 class ChunkedFileReader {
 public:
     static constexpr size_t CHUNK_SIZE = MAX_PAYLOAD;
@@ -23,3 +25,5 @@ private:
     std::ifstream stream;
     uintmax_t totalSize;
 };
+
+}

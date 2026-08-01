@@ -44,6 +44,10 @@ namespace Session {
         ClientSession session;
         session.socket = clientSock;
         session.currentDir = g_pathResolver.root();
+        int peerLength = sizeof(session.controlPeerAddr);
+        getpeername(clientSock,
+                    reinterpret_cast<sockaddr*>(&session.controlPeerAddr),
+                    &peerLength);
 
         replyWithCode(clientSock, ReplyCode::ServiceReady, "Service ready.");
 
@@ -70,13 +74,23 @@ namespace Session {
                 else CommandDispatcher::executeCommand(session, cmd);
 
                 // Check if client disconnected from server
-                if (session.socket == INVALID_SOCKET) return;
+                if (session.socket == INVALID_SOCKET) {
+                    if (session.pendingDataSocket != INVALID_SOCKET) {
+                        closesocket(session.pendingDataSocket);
+                        session.pendingDataSocket = INVALID_SOCKET;
+                    }
+                    return;
+                }
 
                 // Remove the processed command from the session buffer
                 inBuffer.erase(0, newlinePos + 1);
             }
         }
 
+        if (session.pendingDataSocket != INVALID_SOCKET) {
+            closesocket(session.pendingDataSocket);
+            session.pendingDataSocket = INVALID_SOCKET;
+        }
         closesocket(clientSock);
         printf("Client disconnected.\n");
     }

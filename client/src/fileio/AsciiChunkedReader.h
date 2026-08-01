@@ -4,6 +4,8 @@
 #include <vector>
 #include <filesystem>
 
+namespace hybridftp::client {
+
 class AsciiChunkedReader {
 public:
     explicit AsciiChunkedReader(const std::filesystem::path& filePath);
@@ -15,3 +17,5 @@ private:
     AsciiTranslator translator;
     std::vector<char> pendingOutput;
 };
+
+}

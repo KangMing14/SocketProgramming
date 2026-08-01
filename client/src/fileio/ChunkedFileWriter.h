@@ -9,6 +9,8 @@
 
 namespace fs = std::filesystem;
 
+namespace hybridftp::client {
+
 class ChunkedFileWriter {
 public:
 
@@ -24,3 +26,5 @@ private:
     fs::path filePath;
     std::map<uint32_t, std::vector<char>> pendingChunks;
 };
+
+}

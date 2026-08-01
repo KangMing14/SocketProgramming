@@ -1,5 +1,7 @@
 #include "ChunkedFileWriter.h"
 
+namespace hybridftp::client {
+
 ChunkedFileWriter::ChunkedFileWriter(const fs::path& filePath) : filePath(filePath) {}
 
 bool ChunkedFileWriter::isValid() const { return !filePath.empty(); }
@@ -27,4 +29,6 @@ bool ChunkedFileWriter::finalize(uint32_t expectedChunkCount,
     }
 
     return true;
+}
+
 }

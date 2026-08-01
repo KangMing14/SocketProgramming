@@ -5,7 +5,9 @@
 #include <fstream>
 #include <vector>
 
+#ifdef _MSC_VER
 #pragma comment(lib, "bcrypt.lib")
+#endif
 
 namespace Sha256Hasher {
 	std::string hashFile(const fs::path& filePath) {

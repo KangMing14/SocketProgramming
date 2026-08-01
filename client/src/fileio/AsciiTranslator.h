@@ -1,6 +1,8 @@
 #pragma once
 #include <vector>
 
+namespace hybridftp::client {
+
 class AsciiTranslator {
 public:
     std::vector<char> encode(const std::vector<char>& raw);
@@ -11,3 +13,5 @@ private:
     bool encodeCarryCR = false;
     bool decodeCarryCR = false;
 };
+
+}

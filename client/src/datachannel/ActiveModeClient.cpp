@@ -2,6 +2,8 @@
 #include <ws2tcpip.h>
 #include <cstdio>
 
+namespace hybridftp::client {
+
 bool getLocalIPv4ForServer(const std::string& serverIp, uint32_t& outIpv4) {
     SOCKET probeSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (probeSock == INVALID_SOCKET) return false;
@@ -69,4 +71,6 @@ std::string formatPortCommand(uint32_t ipv4Address, unsigned short port) {
     char buffer[32];
     sprintf_s(buffer, "%d,%d,%d,%d,%d,%d", h1, h2, h3, h4, p1, p2);
     return std::string(buffer);
+}
+
 }
