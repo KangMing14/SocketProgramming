@@ -108,13 +108,17 @@ add_executable(test_hashing tests/test_hashing.cpp)
 target_link_libraries(test_hashing PRIVATE server_core)
 add_test(NAME Hashing COMMAND test_hashing)
 
-#add_executable(test_data_channel tests/test_data_channel.cpp)
-#target_link_libraries(test_data_channel PRIVATE server_core)
-#add_test(NAME DataChannel COMMAND test_data_channel)
+add_executable(test_data_channel tests/test_data_channel.cpp)
+target_link_libraries(test_data_channel PRIVATE server_core)
+add_test(NAME DataChannel COMMAND test_data_channel)
 
-#add_executable(test_ascii_translator tests/test_ascii_translator.cpp)
-#target_link_libraries(test_ascii_translator PRIVATE server_core ws2_32)
-#add_test(NAME ASCIITest COMMAND test_ascii_translator)
+add_executable(test_ascii_translator tests/test_ascii_translator.cpp)
+target_link_libraries(test_ascii_translator PRIVATE server_core ws2_32)
+add_test(NAME ASCIITest COMMAND test_ascii_translator)
+
+add_executable(test_data_channel_client tests/test_data_channel_client.cpp)
+target_link_libraries(test_data_channel_client PRIVATE client_core)
+add_test(NAME DataChannelClient COMMAND test_data_channel_client)
 
 add_executable(test_rdt tests/test_rdt.cpp)
 target_link_libraries(test_rdt PRIVATE server_core ws2_32)
