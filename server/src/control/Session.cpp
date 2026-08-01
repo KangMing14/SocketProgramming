@@ -4,11 +4,34 @@
 #include "CommandDispatcher.h"
 #include "Globals.h"
 #include <winsock2.h>
+#include <sstream>
 
 namespace Session {
     void replyWithCode(SOCKET clientSocket, int replyCode, std::string message = ""){
         // Respond to the client with the reply code
         std::string response = std::to_string(replyCode) + " " + message + "\r\n";
+        send(clientSocket, response.c_str(), (int) response.length(), 0);
+    }
+
+    void multilineReplyWithCode(SOCKET clientSocket, int replyCode, std::string message = ""){
+        std::stringstream ss(message);
+        std::string line, response;
+        std::vector<std::string> lines;
+
+        // Split input text by newlines, strip trailing \r
+        while (std::getline(ss, line, '\n')) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            lines.push_back(line);
+        }
+
+        std::cout << lines[1] << std::endl;
+
+        for (size_t i = 0; i < lines.size() - 1; ++i) {
+            response = std::to_string(replyCode) + "-" + message + "\r\n";
+            send(clientSocket, response.c_str(), (int) response.length(), 0);
+        }
+
+        response = std::to_string(replyCode) + " " + message + "\r\n";
         send(clientSocket, response.c_str(), (int) response.length(), 0);
     }
 

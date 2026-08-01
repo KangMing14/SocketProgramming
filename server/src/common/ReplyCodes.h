@@ -7,6 +7,7 @@ namespace ReplyCode {
     // 2xx - Positive 
     constexpr int SystemStatus = 211;
     constexpr int FileStatus = 213;
+    constexpr int HelpMessage = 214;
     constexpr int ServiceReady = 220;
     constexpr int Goodbye = 221;
     constexpr int LoggedIn = 230;           // PASS success
