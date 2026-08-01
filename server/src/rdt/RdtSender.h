@@ -8,9 +8,12 @@
 #include <chrono>
 #include <deque>
 #include <vector>
+#include <functional>
 
 class RdtSender : public IRdtTransport
 {
+  friend class RdtTestAccess;
+
 private:
   static constexpr double RTT_ALPHA = 0.125;
   static constexpr double RTT_BETA = 0.25;
@@ -27,6 +30,10 @@ private:
   double devRttMs;
   double cwnd;
   size_t cleanAcks;
+
+  // Test seams
+  std::function<int(SOCKET, const char*, int, int, const sockaddr*, int)> injectedSendTo;
+  std::function<void()> injectedPreSendDelay;
 
   // Helper to physically send the packet
   bool sendRawPacket(const RdtPacket &packet, std::chrono::steady_clock::time_point &outSendTime);

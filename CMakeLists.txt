@@ -102,12 +102,20 @@ add_test(NAME RdtPayloadTest COMMAND test_rdt_payload_bounds)
 
 add_executable(test_rdt_integration tests/test_rdt_integration.cpp)
 target_link_libraries(test_rdt_integration PRIVATE ftp_core ws2_32)
-add_test(NAME RdtIntegrationTest COMMAND test_rdt_integration)
-
-add_executable(test_chaos_integrity tests/test_chaos_integrity.cpp)
-target_link_libraries(test_chaos_integrity PRIVATE ftp_core ws2_32)
-add_test(NAME ChaosTest COMMAND test_chaos_integrity)
 
 add_executable(test_rdt_congestion tests/test_rdt_congestion.cpp)
 target_link_libraries(test_rdt_congestion PRIVATE ftp_core ws2_32)
-add_test(NAME RdtCongestionTest COMMAND test_rdt_congestion)
+
+if(ENABLE_CHAOS_MODE)
+    add_executable(test_chaos_integrity tests/test_chaos_integrity.cpp)
+    target_link_libraries(test_chaos_integrity PRIVATE ftp_core ws2_32)
+    add_test(NAME ChaosTest COMMAND test_chaos_integrity)
+    set_tests_properties(ChaosTest PROPERTIES LABELS "chaos")
+else()
+    add_test(NAME RdtIntegrationTest COMMAND test_rdt_integration)
+    add_test(NAME RdtCongestionTest COMMAND test_rdt_congestion)
+    set_tests_properties(
+        RdtIntegrationTest RdtCongestionTest
+        PROPERTIES LABELS "deterministic"
+    )
+endif()

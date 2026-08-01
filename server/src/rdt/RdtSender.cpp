@@ -189,16 +189,23 @@ bool RdtSender::sendRawPacket(const RdtPacket &packet, std::chrono::steady_clock
     // sendto() shoots this flat buffer as a UDP postcard to destAddr
     int totalSize = HEADER_SIZE + payload_len;
 
+    if (injectedPreSendDelay) {
+        injectedPreSendDelay();
+    }
+
     const auto sendTime = std::chrono::steady_clock::now();
 
-    int sent = sendto(udpSocket, sendBuf, totalSize, 0, (sockaddr *)&destAddr,
-                      sizeof(destAddr));
+    int sent;
+    if (injectedSendTo) {
+        sent = injectedSendTo(udpSocket, sendBuf, totalSize, 0, (sockaddr *)&destAddr, sizeof(destAddr));
+    } else {
+        sent = sendto(udpSocket, sendBuf, totalSize, 0, (sockaddr *)&destAddr, sizeof(destAddr));
+    }
   
     if (sent == SOCKET_ERROR)
     {
-#if RDT_DEBUG
-      std::cerr << "[Sender] sendto() failed: " << WSAGetLastError() << std::endl;
-#endif
+      const int errorCode = WSAGetLastError();
+      std::cerr << "[Sender] sendto() failed: " << errorCode << std::endl;
       return false;
     }
 
@@ -345,7 +352,6 @@ bool RdtSender::pollAcksAndRetransmit(bool blocking)
       auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - pkt.sent_time).count();
       if (duration > currentTimeoutMs)
       {
-        pkt.retries++;
         if (pkt.retries >= MAX_RETRIES)
         {
           std::cerr << "[Sender] FATAL: seq=" << pkt.seq_num << " failed after " << MAX_RETRIES << " retries. Aborting." << std::endl;
@@ -353,7 +359,7 @@ bool RdtSender::pollAcksAndRetransmit(bool blocking)
         }
 
         // Retransmit
-        std::cerr << "[Sender] Timeout for seq=" << pkt.seq_num << ", retransmitting (attempt " << pkt.retries << ")!" << std::endl;
+        std::cerr << "[Sender] Timeout for seq=" << pkt.seq_num << ", retransmitting (attempt " << (pkt.retries + 1) << ")!" << std::endl;
 
         RdtPacket rawPkt;
         memset(&rawPkt, 0, sizeof(rawPkt));
@@ -373,10 +379,13 @@ bool RdtSender::pollAcksAndRetransmit(bool blocking)
         rawPkt.header.checksum = internetChecksum((const uint8_t *)tempBuf, HEADER_SIZE + pkt.data.size());
 
         std::chrono::steady_clock::time_point actualSendTime;
-        if (sendRawPacket(rawPkt, actualSendTime)) {
-            pkt.sent_time = actualSendTime;
-            pkt.retransmitted = true;
+        if (!sendRawPacket(rawPkt, actualSendTime)) {
+            return false;
         }
+
+        pkt.retries++;
+        pkt.sent_time = actualSendTime;
+        pkt.retransmitted = true;
       }
     }
   }
