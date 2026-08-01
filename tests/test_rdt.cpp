@@ -62,15 +62,30 @@ void testHeaderRoundTripAndChecksum() {
     require(roundTrip.checksum == original.checksum,
             "Checksum changed after serialization round trip");
 
-    require(
-        internetChecksum(
-            reinterpret_cast<const uint8_t*>(buffer.data()), buffer.size()) == 0,
-        "A valid serialized header should have a zero verification checksum");
+    // Verify the checksum using the same contract as the production receiver:
+    // extract the transmitted value, clear the checksum field, then recompute.
+    // This avoids assuming that internetChecksum() can verify an embedded
+    // checksum by returning zero, which depends on its byte-order convention.
+    auto verificationBuffer = buffer;
+    verificationBuffer[13] = 0;
+    verificationBuffer[14] = 0;
+
+    const uint16_t recomputedChecksum = internetChecksum(
+        reinterpret_cast<const uint8_t*>(verificationBuffer.data()),
+        verificationBuffer.size());
+
+    require(recomputedChecksum == roundTrip.checksum,
+            "A valid serialized header should preserve its checksum");
 
     buffer[2] ^= 0x01;
+    verificationBuffer = buffer;
+    verificationBuffer[13] = 0;
+    verificationBuffer[14] = 0;
+
     require(
         internetChecksum(
-            reinterpret_cast<const uint8_t*>(buffer.data()), buffer.size()) != 0,
+            reinterpret_cast<const uint8_t*>(verificationBuffer.data()),
+            verificationBuffer.size()) != roundTrip.checksum,
         "Checksum failed to detect a flipped bit");
 
     std::cout << "[PASS] header serialization and checksum\n";
