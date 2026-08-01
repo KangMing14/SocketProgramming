@@ -1,9 +1,6 @@
 #pragma once
 
 #include <filesystem>
-#include <vector>
-#include <cstdint>
-#include <winsock2.h>
 #include "../rdt/RdtHeader.h"
 #include "../common/TransferMode.h"
 
