@@ -373,7 +373,7 @@ namespace CommandDispatcher{
             else {
                 auto it = helpMap.find(args[0]);
                 if (it != helpMap.end()) {
-                    Session::replyWithCode(s.socket, ReplyCode::HelpMessage, it->second);
+                    Session::multilineReplyWithCode(s.socket, ReplyCode::HelpMessage, it->second);
                 }
                 else {
                     Session::replyWithCode(s.socket, ReplyCode::SyntaxError, "Command not found: " + args[0]);

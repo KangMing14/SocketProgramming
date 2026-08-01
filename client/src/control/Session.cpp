@@ -108,7 +108,8 @@ namespace Session {
 
                     std::cout << reply << "\n";
                     inBuffer.erase(0, newlinePos + 1);
-                    replyReceived = true; 
+                    if (reply.length() >= 4 && std::isdigit(reply[0]) && std::isdigit(reply[1]) && std::isdigit(reply[2]) && reply[3] == '-');
+                    else replyReceived = true; 
                 }
             }
         }

@@ -24,14 +24,12 @@ namespace Session {
             lines.push_back(line);
         }
 
-        std::cout << lines[1] << std::endl;
-
         for (size_t i = 0; i < lines.size() - 1; ++i) {
-            response = std::to_string(replyCode) + "-" + message + "\r\n";
+            response = std::to_string(replyCode) + "-" + lines[i] + "\r\n";
             send(clientSocket, response.c_str(), (int) response.length(), 0);
         }
 
-        response = std::to_string(replyCode) + " " + message + "\r\n";
+        response = std::to_string(replyCode) + " " + lines[lines.size()-1] + "\r\n";
         send(clientSocket, response.c_str(), (int) response.length(), 0);
     }
 
