@@ -36,6 +36,10 @@ target_include_directories(ftp_core PUBLIC
     server/src/common
     client/src
     client/src/control
+    client/src/common
+    client/scr/crypto
+    client/scr/datachannel
+    client/scr/fileio
     client/src/rdt
 )
 
@@ -85,3 +89,7 @@ add_test(NAME RdtPayloadTest COMMAND test_rdt_payload_bounds)
 add_executable(test_rdt_integration tests/test_rdt_integration.cpp)
 target_link_libraries(test_rdt_integration PRIVATE ftp_core ws2_32)
 add_test(NAME RdtIntegrationTest COMMAND test_rdt_integration)
+
+add_executable(test_chaos_integrity tests/test_chaos_integrity.cpp)
+target_link_libraries(test_chaos_integrity PRIVATE ftp_core ws2_32)
+add_test(NAME ChaosTest COMMAND test_chaos_integrity)
