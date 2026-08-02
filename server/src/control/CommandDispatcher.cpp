@@ -30,15 +30,143 @@ bool portMatchesControlPeer(const ClientSession& session,
 }
 
 namespace CommandDispatcher{
+    std::map<std::string, std::string> helpMap = {
+        { "USER", 
+            "Syntax: USER <username>\n"
+            "Send the client's username to initiate an authentication session."
+        },
+        { "PASS", 
+            "Syntax: PASS <password>\n"
+            "Send the client's password to complete authentication."
+        },
+        { "QUIT", 
+            "Syntax: QUIT\n"
+            "Gracefully terminate the control connection and end the session."
+        },
+        { "NOOP", 
+            "Syntax: NOOP\n"
+            "No-operation; used as a keep-alive ping to prevent session timeout."
+        },
+        { "PWD", 
+            "Syntax: PWD\n"
+            "Print the server's current working directory path."
+        },
+        { "CWD", 
+            "Syntax: CWD <path>\n"
+            "Change the server's current working directory to the specified path."
+        },
+        { "CDUP", 
+            "Syntax: CDUP\n"
+            "Change the server's working directory to its parent directory."
+        },
+        { "MKD", 
+            "Syntax: MKD <dirname>\n"
+            "Create a new directory on the server at the current path."
+        },
+        { "RMD", 
+            "Syntax: RMD <dirname>\n"
+            "Remove an empty directory from the server."
+        },
+        { "LIST", 
+            "Syntax: LIST [path]\n"
+            "Return a detailed listing (name, size, type, permissions) of files and directories in the current or specified path."
+        },
+        { "NLST", 
+            "Syntax: NLST [path]\n"
+            "Return a plain name-only listing of files in the current or specified path."
+        },
+        { "STAT", 
+            "Syntax: STAT [path]\n"
+            "Return server status or, if a path is given, file/directory metadata."
+        },
+        { "SIZE", 
+            "Syntax: SIZE <filename>\n"
+            "Return the exact byte size of the specified file on the server."
+        },
+        { "MDTM", 
+            "Syntax: MDTM <filename>\n"
+            "Return the last modification timestamp of the specified file (format: YYYYMMDDhhmmss)."
+        },
+        { "TYPE", 
+            "Syntax: TYPE {A | I}\n"
+            "Set the data transfer type: A = ASCII (text), I = Image/Binary."
+        },
+        { "MODE", 
+            "Syntax: MODE {S | B | C}\n"
+            "Set the transfer mode: S = Stream, B = Block, C = Compressed."
+        },
+        { "PORT", 
+            "Syntax: PORT <h1,h2,h3,h4,p1,p2>\n"
+            "Active Mode: Client specifies its IP and port for the server to open the data connection back to. "
+        },
+        { "PASV", 
+            "Syntax: PASV\n"
+            "Passive Mode: Server opens a random port and returns its IP + port for the client to connect to."
+        },
+        { "RETR", 
+            "Syntax: RETR <filename>\n"
+            "Retrieve (download) the specified file from the server to the client via the data channel."
+        },
+        { "STOR", 
+            "Syntax: STOR <filename>\n"
+            "Store (upload) a file from the client to the server using the current filename."
+        },
+        { "STOU", 
+            "Syntax: STOU\n"
+            "Store a file with a guaranteed unique server-generated filename to prevent overwrites."
+        },
+        { "APPE", 
+            "Syntax: APPE <filename>\n"
+            "Append the uploaded data to an existing file on the server; create it if absent."
+        },
+        { "DELE", 
+            "Syntax: DELE <filename>\n"
+            "Delete the specified file from the server."
+        },
+        { "RNFR", 
+            "Syntax: RNFR <oldname>\n"
+            "Rename From: specify the file to be renamed (must be followed by RNTO)."
+        },
+        { "RNTO", 
+            "Syntax: RNTO <newname>\n"
+            "Rename To: complete the rename operation initiated by RNFR."
+        },
+        { "HASH", 
+            "Syntax: HASH <filename>\n"
+            "Request a cryptographic hash (MD5 or SHA-256) of the specified file for post-transfer integrity verification."
+        },
+        { "ABOR", 
+            "Syntax: ABOR\n"
+            "Abort the current data transfer in progress; data channel is reset."
+        },
+        { "HELP", 
+            "Syntax: HELP [command]\n"
+            "Return help text for all supported commands, or detailed usage for a specific command."
+        },
+    };
+
     std::map<std::string, std::function<void(ClientSession&, const std::vector<std::string>&)>> commandMap = {
         { "USER", [](ClientSession& s, const std::vector<std::string>& args) {
-            s.username = args.empty() ? "" : args[0];
-            Session::replyWithCode(s.socket, ReplyCode::AuthNeedPass, "Username OK, need password.");
+            std::string user = args.empty() ? "" : args[0];
+            auto it = Users::database.find(user);
+            if (it != Users::database.end()) {
+                s.username = user;
+                Session::replyWithCode(s.socket, ReplyCode::AuthNeedPass, "Username OK, need password.");
+            }
+            else {
+                Session::replyWithCode(s.socket, ReplyCode::NotLoggedIn, "Not logged in, username incorrect.");
+            }
+            
         }},
 
-        { "PASS", [](ClientSession& s, const std::vector<std::string>&) {
-            s.authenticated = true;   // Basic Level
-            Session::replyWithCode(s.socket, ReplyCode::LoggedIn, "User logged in.");
+        { "PASS", [](ClientSession& s, const std::vector<std::string>& args) {
+            if (s.username.empty()) return Session::replyWithCode(s.socket, ReplyCode::BadSequence, "Log in with USER first.");
+            std::string pw = args.empty() ? "" : args[0];
+            if (pw == Users::database.find(s.username)->second) {
+                s.authenticated = true;   // Basic Level
+                Session::replyWithCode(s.socket, ReplyCode::LoggedIn, "User logged in.");
+            }
+            else Session::replyWithCode(s.socket, ReplyCode::NotLoggedIn, "Not logged in, password incorrect.");
         }},
 
         { "QUIT", [](ClientSession& s, const std::vector<std::string>&) {
@@ -305,12 +433,38 @@ namespace CommandDispatcher{
             Session::replyWithCode(s.socket, ReplyCode::ActionCompleted, "Type set to " + args[0] + ".");
         } },
 
-        // To Do: STOU, APPE, ABOR, HELP
+        { "HELP", [](ClientSession& s, const std::vector<std::string>& args) {
+            if (args.empty()) {
+                Session::multilineReplyWithCode(s.socket, ReplyCode::HelpMessage,
+                    "The following commands are recognized:\n"
+                    "USER   PASS    QUIT    NOOP    PWD     CWD     CDUP    MKD \n"
+                    "RMD    LIST    NLST    STAT    SIZE    MDTM    TYPE    MODE\n"
+                    "PORT   PASV    RETR    STOR    STOU    APPE    DELE    RNFR\n"
+                    "RNTO   HASH    ABOR    HELP"
+                );
+                return;
+            }
+            else {
+                auto it = helpMap.find(args[0]);
+                if (it != helpMap.end()) {
+                    Session::multilineReplyWithCode(s.socket, ReplyCode::HelpMessage, it->second);
+                }
+                else {
+                    Session::replyWithCode(s.socket, ReplyCode::SyntaxError, "Command not found: " + args[0]);
+                }
+            }
+        } }
+
+        // To Do: STOU, APPE, ABOR
     };
     
     void executeCommand(ClientSession& s, const ParsedCommand cmd){
         auto it = commandMap.find(cmd.type);
         if (it != commandMap.end()) {
+            if (!s.authenticated && cmd.type != "USER" && cmd.type != "PASS" && 
+                cmd.type != "HELP" && cmd.type != "NOOP" && cmd.type != "QUIT") {
+                return Session::replyWithCode(s.socket, ReplyCode::NotLoggedIn, "Please log in using USER and PASS.");
+            }
             it->second(s, cmd.args);
         }
         else {

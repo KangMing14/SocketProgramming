@@ -1,4 +1,5 @@
 #pragma once
+#include "../common/Users.h"
 #include "../common/ReplyCodes.h"
 #include "CommandParser.h"
 #include "Session.h"
