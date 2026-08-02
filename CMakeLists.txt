@@ -47,6 +47,7 @@ add_library(ftp_client_core STATIC
     client/src/fileio/ChunkedFileWriter.cpp
     client/src/fileio/AsciiTranslator.cpp
     client/src/fileio/AsciiChunkedReader.cpp
+    client/src/crypto/Sha256Hasher.cpp
     client/src/rdt/RdtSender.cpp
     client/src/rdt/RdtReceiver.cpp
 )

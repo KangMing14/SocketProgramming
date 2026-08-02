@@ -7,6 +7,7 @@
 #include "RdtSender.h"
 #include "ReplyCodes.h"
 #include "TransferMode.h"
+#include "../crypto/Sha256Hasher.h"
 
 #include <algorithm>
 #include <cctype>
@@ -129,6 +130,17 @@ std::string upper(std::string value) {
     return value;
 }
 
+bool extractHash(const std::string& replyLine, std::string& outHash) {
+    const std::string marker = "SHA256=";
+    size_t pos = replyLine.find(marker);
+    if (pos == std::string::npos) return false;
+    outHash = replyLine.substr(pos + marker.size());
+    while (!outHash.empty() && !std::isxdigit(static_cast<unsigned char>(outHash.back()))) {
+        outHash.pop_back();
+    }
+    return outHash.size() == 64;
+}
+
 bool enterActiveMode(SOCKET controlSocket, ClientState& state,
                      const std::vector<std::string>& tokens) {
     if (tokens.size() != 1) {
@@ -218,6 +230,11 @@ bool storeFile(SOCKET controlSocket, ClientState& state,
         return true;
     }
 
+    std::string localHash;
+    if (state.transferMode == TransferMode::Binary) {
+        localHash = Sha256Hasher::hashFile(localPath);
+    }
+
     const std::string remotePath =
         tokens.size() == 3 ? tokens[2] : localPath.filename().string();
     if (remotePath.empty()) {
@@ -258,6 +275,17 @@ bool storeFile(SOCKET controlSocket, ClientState& state,
     if (!printReply(controlSocket, state, completion)) return false;
     if (!transferOkay || completion.code != ReplyCode::TransferComplete) {
         std::cerr << "Upload failed.\n";
+    } else if (state.transferMode == TransferMode::Binary && !localHash.empty()) {
+        std::string serverHash;
+        if (extractHash(completion.line, serverHash)) {
+            if (serverHash == localHash) {
+                std::cout << "Integrity verified: SHA-256 matches (" << serverHash << ")\n";
+            }
+            else {
+                std::cerr << "WARNING: hash mismatch! Local=" << localHash
+                    << " Server=" << serverHash << "\n";
+            }
+        }
     }
     return true;
 }
@@ -311,6 +339,18 @@ bool retrieveFile(SOCKET controlSocket, ClientState& state,
     if (!printReply(controlSocket, state, completion)) return false;
     if (!transferOkay || completion.code != ReplyCode::TransferComplete) {
         std::cerr << "Download failed.\n";
+    } else if (state.transferMode == TransferMode::Binary) {
+        std::string serverHash;
+        if (extractHash(completion.line, serverHash)) {
+            std::string localHash = Sha256Hasher::hashFile(localPath);
+            if (localHash == serverHash) {
+                std::cout << "Integrity verified: SHA-256 matches (" << serverHash << ")\n";
+            }
+            else {
+                std::cerr << "WARNING: hash mismatch! Local=" << localHash
+                    << " Server=" << serverHash << "\n";
+            }
+        }
     }
     return true;
 }

@@ -360,8 +360,17 @@ namespace CommandDispatcher{
                 return;
             }
             bool ok = channel.sendFile(resolved, s.transferMode);
-            Session::replyWithCode(s.socket, ok ? ReplyCode::TransferComplete : ReplyCode::TransferAborted,
-                                    ok ? "Transfer complete." : "Transfer failed.");
+            if (ok && s.transferMode == TransferMode::Binary) {
+                std::string hash = Sha256Hasher::hashFile(resolved);
+                std::string msg = hash.empty()
+                    ? "Transfer complete. Hash unavailable."
+                    : "Transfer complete. SHA256=" + hash;
+                Session::replyWithCode(s.socket, ReplyCode::TransferComplete, msg);
+            }
+            else {
+                Session::replyWithCode(s.socket, ok ? ReplyCode::TransferComplete : ReplyCode::TransferAborted,
+                    ok ? "Transfer complete." : "Transfer failed.");
+            }
         } },
 
         { "STOR", [](ClientSession& s, const std::vector<std::string>& args) {
@@ -406,8 +415,17 @@ namespace CommandDispatcher{
                 return;
             }
             bool ok = channel.receiveFile(resolved, s.transferMode);
-            Session::replyWithCode(s.socket, ok ? ReplyCode::TransferComplete : ReplyCode::TransferAborted,
-                                    ok ? "Transfer complete." : "Transfer failed.");
+            if (ok && s.transferMode == TransferMode::Binary) {
+                std::string hash = Sha256Hasher::hashFile(resolved);
+                std::string msg = hash.empty()
+                    ? "Transfer complete. Hash unavailable."
+                    : "Transfer complete. SHA256=" + hash;
+                Session::replyWithCode(s.socket, ReplyCode::TransferComplete, msg);
+            }
+            else {
+                Session::replyWithCode(s.socket, ok ? ReplyCode::TransferComplete : ReplyCode::TransferAborted,
+                    ok ? "Transfer complete." : "Transfer failed.");
+            }
         } },
 
         { "HASH", [](ClientSession& s, const std::vector<std::string>& args) {
