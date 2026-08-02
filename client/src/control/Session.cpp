@@ -23,6 +23,7 @@ enum class DataMode { None, Passive, Active };
 struct Reply {
     int code = 0;
     std::string line;
+    std::vector<std::string> lines;
 };
 
 struct ClientState {
@@ -59,22 +60,40 @@ bool sendCommand(SOCKET socket, const std::string& command) {
 }
 
 bool readReply(SOCKET socket, ClientState& state, Reply& reply) {
-    while (true) {
-        const std::size_t newline = state.replyBuffer.find('\n');
-        if (newline != std::string::npos) {
+    reply = Reply{};
+    bool complete = false, multiline = false;
+
+    while (!complete) {
+        std::size_t newline;
+        while ((newline = state.replyBuffer.find('\n')) != std::string::npos) {
             reply.line = state.replyBuffer.substr(0, newline);
             state.replyBuffer.erase(0, newline + 1);
+            
             if (!reply.line.empty() && reply.line.back() == '\r') {
                 reply.line.pop_back();
             }
-            if (reply.line.size() < 3 ||
-                !std::isdigit(static_cast<unsigned char>(reply.line[0])) ||
-                !std::isdigit(static_cast<unsigned char>(reply.line[1])) ||
-                !std::isdigit(static_cast<unsigned char>(reply.line[2]))) {
-                return false;
+
+            if (!reply.code) {
+                if (reply.line.size() < 3 ||
+                    !std::isdigit(static_cast<unsigned char>(reply.line[0])) ||
+                    !std::isdigit(static_cast<unsigned char>(reply.line[1])) ||
+                    !std::isdigit(static_cast<unsigned char>(reply.line[2]))) {
+                    return false;
+                }
+
+                reply.code = std::stoi(reply.line.substr(0, 3));
+
+                if (reply.line.size() > 3 && reply.line[3] == '-') multiline = true;
+                else complete = true;
             }
-            reply.code = std::stoi(reply.line.substr(0, 3));
-            return true;
+            else if (multiline) {
+                std::string codeStr = std::to_string(reply.code);
+
+                if (reply.line.size() > 3 && reply.line.compare(0, 3, codeStr) == 0 && reply.line[3] == ' ') complete = true;
+            }
+            
+            reply.lines.push_back(reply.line);
+            if (complete) return true;
         }
 
         char buffer[512];
@@ -82,11 +101,17 @@ bool readReply(SOCKET socket, ClientState& state, Reply& reply) {
         if (received <= 0) return false;
         state.replyBuffer.append(buffer, received);
     }
+
+    return true;
 }
 
 bool printReply(SOCKET socket, ClientState& state, Reply& reply) {
     if (!readReply(socket, state, reply)) return false;
-    std::cout << reply.line << '\n';
+
+    for (const std::string& line : reply.lines)  {
+        std::cout << line << '\n';
+    }
+    
     return true;
 }
 
