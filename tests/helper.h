@@ -8,19 +8,24 @@ namespace fs = std::filesystem;
 class FakeRdtTransport : public IRdtTransport {
 public:
     std::vector<std::pair<uint32_t, std::vector<char>>> sentChunks;
+    std::vector<bool> sentFinalFlags;
+    size_t receiveIndex = 0;
 
-    bool sendChunk(uint32_t seq, const char* data, size_t len) override {
-        sentChunks.emplace_back(seq, std::vector<char>(data, data + len));
+    bool sendChunk(uint32_t seq, const char* data, size_t len,
+                   bool isFinal = false) override {
+        std::vector<char> bytes;
+        if (len > 0) bytes.assign(data, data + len);
+        sentChunks.emplace_back(seq, std::move(bytes));
+        sentFinalFlags.push_back(isFinal);
         return true; // no real network, always "succeeds"
     }
 
     bool receiveNext(uint32_t& seq, std::vector<char>& data, bool& isFinal) override {
-        static size_t i = 0;
-        if (i >= sentChunks.size()) return false;
-        seq = sentChunks[i].first;
-        data = sentChunks[i].second;
-        isFinal = (i == sentChunks.size() - 1);
-        i++;
+        if (receiveIndex >= sentChunks.size()) return false;
+        seq = sentChunks[receiveIndex].first;
+        data = sentChunks[receiveIndex].second;
+        isFinal = sentFinalFlags[receiveIndex];
+        receiveIndex++;
         return true;
     }
 };

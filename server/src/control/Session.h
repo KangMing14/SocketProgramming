@@ -3,7 +3,9 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 
+#ifdef _MSC_VER
 #pragma comment(lib, "ws2_32.lib")
+#endif
 
 #include <iostream>
 #include <winsock2.h>
@@ -13,6 +15,8 @@
 #include <filesystem>
 #include "TransferMode.h"
 
+enum class DataChannelMode { None, Passive, Active };
+
 struct ClientSession {
     SOCKET socket;
     bool authenticated = false;
@@ -21,9 +25,10 @@ struct ClientSession {
     std::filesystem::path currentDir;
 
     // Populated by PASV/PORT, consumed by STOR/RETR
-    bool dataChannelIsPassive = false;
+    DataChannelMode dataChannelMode = DataChannelMode::None;
     SOCKET pendingDataSocket = INVALID_SOCKET;
     sockaddr_in pendingPeerAddr{};
+    sockaddr_in controlPeerAddr{};
 
     // Populated by RNFR, consumed by RNTO
     std::filesystem::path pendingRenameSource;

@@ -1,42 +1,97 @@
-#include <vector>
-#include <thread>
-#include <cassert>
+#include <cstdint>
+#include <future>
 #include <iostream>
-#include "RdtSender.h"
-#include "RdtReceiver.h"
-#include "ChunkedFileReader.h"
-#include "ProtocolConstants.h"
-
-
-void test_full_size_chunk_survives_round_trip() {
-    // Deliberately send a FULL CHUNK_SIZE (1024-byte) payload -- the exact
-    // scenario that previously overflowed the sender's stack buffers.
-    std::vector<char> data(ChunkedFileReader::CHUNK_SIZE, 'X');
-
-    RdtReceiver receiver((uint16_t)9998);
-    std::thread t([&]() {
-        uint32_t seq; std::vector<char> out; bool isFinal;
-        assert(receiver.receiveNext(seq, out, isFinal));
-        assert(out.size() == ChunkedFileReader::CHUNK_SIZE);
-        });
-
-    RdtSender sender("127.0.0.1", 9998);
-    assert(sender.sendChunk(0, data.data(), data.size()) == true);
-    t.join();
-    std::cout << "[PASS] full CHUNK_SIZE payload survives sender/receiver round trip\n";
-}
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
 
 #include <winsock2.h>
 
-int main() {
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        std::cerr << "WSAStartup failed." << std::endl;
-        return 1;
+#include "ChunkedFileReader.h"
+#include "ProtocolConstants.h"
+#include "RdtReceiver.h"
+#include "RdtSender.h"
+
+namespace {
+
+void require(bool condition, const std::string& message) {
+    if (!condition) {
+        throw std::runtime_error(message);
+    }
+}
+
+class WinsockSession {
+public:
+    WinsockSession() {
+        WSADATA data{};
+        const int result = WSAStartup(MAKEWORD(2, 2), &data);
+        if (result != 0) {
+            throw std::runtime_error(
+                "WSAStartup failed with error " + std::to_string(result));
+        }
     }
 
-    test_full_size_chunk_survives_round_trip();
+    ~WinsockSession() {
+        WSACleanup();
+    }
+};
 
-    WSACleanup();
-    return 0;
+void testFullSizeChunkSurvivesRoundTrip() {
+    constexpr uint16_t port = 9998;
+    std::vector<char> input(ChunkedFileReader::CHUNK_SIZE, 'X');
+
+    RdtReceiver receiver(port);
+    std::packaged_task<bool()> receiveTask([&]() {
+        uint32_t sequenceNumber = 0;
+        std::vector<char> output;
+        bool isFinal = false;
+
+        if (!receiver.receiveNext(sequenceNumber, output, isFinal)) {
+            return false;
+        }
+
+        return sequenceNumber == 0 &&
+               output.size() == ChunkedFileReader::CHUNK_SIZE &&
+               output == input;
+    });
+
+    std::future<bool> receiveResult = receiveTask.get_future();
+    std::thread receiverThread(std::move(receiveTask));
+
+    bool sendSucceeded = false;
+    try {
+        RdtSender sender("127.0.0.1", port);
+        sendSucceeded =
+            sender.sendChunk(0, input.data(), input.size()) && sender.flush();
+
+        const bool receiveSucceeded = receiveResult.get();
+        receiverThread.join();
+
+        require(sendSucceeded, "Sender failed for a MAX_PAYLOAD chunk");
+        require(receiveSucceeded,
+                "MAX_PAYLOAD data changed during the round trip");
+    } catch (...) {
+        if (receiverThread.joinable()) {
+            receiverThread.join();
+        }
+        throw;
+    }
+
+    std::cout
+        << "[PASS] full CHUNK_SIZE payload survives the RDT round trip\n";
+}
+
+}  // namespace
+
+int main() {
+    try {
+        WinsockSession winsock;
+        testFullSizeChunkSurvivesRoundTrip();
+        return 0;
+    } catch (const std::exception& exception) {
+        std::cerr << "[FAIL] " << exception.what() << '\n';
+        return 1;
+    }
 }

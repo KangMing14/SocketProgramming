@@ -9,26 +9,41 @@ DataChannelSession::DataChannelSession(IRdtTransport& transport)
     : transport(transport) {}
 
 bool DataChannelSession::sendFile(const std::filesystem::path& filePath, TransferMode mode) {
-    std::vector<char> chunk;
+    std::vector<char> currentChunk;
+    std::vector<char> nextChunk;
     uint32_t seq = 0;
 
     if (mode == TransferMode::Binary) {
         ChunkedFileReader reader(filePath);
         if (!reader.isOpen()) return false;
-        while (reader.nextChunk(chunk)) {
-            if (!transport.sendChunk(seq, chunk.data(), chunk.size())) return false;
+        if (!reader.nextChunk(currentChunk)) {
+            return transport.sendChunk(0, nullptr, 0, true) && transport.flush();
+        }
+        while (true) {
+            const bool hasNext = reader.nextChunk(nextChunk);
+            if (!transport.sendChunk(seq, currentChunk.data(), currentChunk.size(), !hasNext)) return false;
             seq++;
+            if (!hasNext) break;
+            currentChunk.swap(nextChunk);
+            nextChunk.clear();
         }
     }
     else {
         AsciiChunkedReader reader(filePath);
         if (!reader.isOpen()) return false;
-        while (reader.nextChunk(chunk)) {
-            if (!transport.sendChunk(seq, chunk.data(), chunk.size())) return false;
+        if (!reader.nextChunk(currentChunk)) {
+            return transport.sendChunk(0, nullptr, 0, true) && transport.flush();
+        }
+        while (true) {
+            const bool hasNext = reader.nextChunk(nextChunk);
+            if (!transport.sendChunk(seq, currentChunk.data(), currentChunk.size(), !hasNext)) return false;
             seq++;
+            if (!hasNext) break;
+            currentChunk.swap(nextChunk);
+            nextChunk.clear();
         }
     }
-    return true;
+    return transport.flush();
 }
 
 bool DataChannelSession::receiveFile(const std::filesystem::path& destPath, TransferMode mode) {
@@ -38,7 +53,8 @@ bool DataChannelSession::receiveFile(const std::filesystem::path& destPath, Tran
     std::vector<char> data;
     bool isFinal = false;
 
-    while (transport.receiveNext(seq, data, isFinal)) {
+    while (true) {
+        if (!transport.receiveNext(seq, data, isFinal)) return false;
         writer.addChunk(seq, data);
         chunkCount++;
 

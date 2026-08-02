@@ -10,123 +10,26 @@
 #include "RdtSender.h"
 #include "Sha256Hasher.h"
 #include <memory>
+#include <utility>
+
+namespace {
+void clearDataState(ClientSession& session) {
+    if (session.pendingDataSocket != INVALID_SOCKET) {
+        closesocket(session.pendingDataSocket);
+        session.pendingDataSocket = INVALID_SOCKET;
+    }
+    session.pendingPeerAddr = {};
+    session.dataChannelMode = DataChannelMode::None;
+}
+
+bool portMatchesControlPeer(const ClientSession& session,
+                            const sockaddr_in& advertised) {
+    return advertised.sin_addr.s_addr == session.controlPeerAddr.sin_addr.s_addr &&
+           advertised.sin_port != 0;
+}
+}
 
 namespace CommandDispatcher{
-    std::map<std::string, std::string> helpMap = {
-        { "USER", 
-            "Syntax: USER <username>\n"
-            "Send the client's username to initiate an authentication session."
-        },
-        { "PASS", 
-            "Syntax: PASS <password>\n"
-            "Send the client's password to complete authentication."
-        },
-        { "QUIT", 
-            "Syntax: QUIT\n"
-            "Gracefully terminate the control connection and end the session."
-        },
-        { "NOOP", 
-            "Syntax: NOOP\n"
-            "No-operation; used as a keep-alive ping to prevent session timeout."
-        },
-        { "PWD", 
-            "Syntax: PWD\n"
-            "Print the server's current working directory path."
-        },
-        { "CWD", 
-            "Syntax: CWD <path>\n"
-            "Change the server's current working directory to the specified path."
-        },
-        { "CDUP", 
-            "Syntax: CDUP\n"
-            "Change the server's working directory to its parent directory."
-        },
-        { "MKD", 
-            "Syntax: MKD <dirname>\n"
-            "Create a new directory on the server at the current path."
-        },
-        { "RMD", 
-            "Syntax: RMD <dirname>\n"
-            "Remove an empty directory from the server."
-        },
-        { "LIST", 
-            "Syntax: LIST [path]\n"
-            "Return a detailed listing (name, size, type, permissions) of files and directories in the current or specified path."
-        },
-        { "NLST", 
-            "Syntax: NLST [path]\n"
-            "Return a plain name-only listing of files in the current or specified path."
-        },
-        { "STAT", 
-            "Syntax: STAT [path]\n"
-            "Return server status or, if a path is given, file/directory metadata."
-        },
-        { "SIZE", 
-            "Syntax: SIZE <filename>\n"
-            "Return the exact byte size of the specified file on the server."
-        },
-        { "MDTM", 
-            "Syntax: MDTM <filename>\n"
-            "Return the last modification timestamp of the specified file (format: YYYYMMDDhhmmss)."
-        },
-        { "TYPE", 
-            "Syntax: TYPE {A | I}\n"
-            "Set the data transfer type: A = ASCII (text), I = Image/Binary."
-        },
-        { "MODE", 
-            "Syntax: MODE {S | B | C}\n"
-            "Set the transfer mode: S = Stream, B = Block, C = Compressed."
-        },
-        { "PORT", 
-            "Syntax: PORT <h1,h2,h3,h4,p1,p2>\n"
-            "Active Mode: Client specifies its IP and port for the server to open the data connection back to. "
-        },
-        { "PASV", 
-            "Syntax: PASV\n"
-            "Passive Mode: Server opens a random port and returns its IP + port for the client to connect to."
-        },
-        { "RETR", 
-            "Syntax: RETR <filename>\n"
-            "Retrieve (download) the specified file from the server to the client via the data channel."
-        },
-        { "STOR", 
-            "Syntax: STOR <filename>\n"
-            "Store (upload) a file from the client to the server using the current filename."
-        },
-        { "STOU", 
-            "Syntax: STOU\n"
-            "Store a file with a guaranteed unique server-generated filename to prevent overwrites."
-        },
-        { "APPE", 
-            "Syntax: APPE <filename>\n"
-            "Append the uploaded data to an existing file on the server; create it if absent."
-        },
-        { "DELE", 
-            "Syntax: DELE <filename>\n"
-            "Delete the specified file from the server."
-        },
-        { "RNFR", 
-            "Syntax: RNFR <oldname>\n"
-            "Rename From: specify the file to be renamed (must be followed by RNTO)."
-        },
-        { "RNTO", 
-            "Syntax: RNTO <newname>\n"
-            "Rename To: complete the rename operation initiated by RNFR."
-        },
-        { "HASH", 
-            "Syntax: HASH <filename>\n"
-            "Request a cryptographic hash (MD5 or SHA-256) of the specified file for post-transfer integrity verification."
-        },
-        { "ABOR", 
-            "Syntax: ABOR\n"
-            "Abort the current data transfer in progress; data channel is reset."
-        },
-        { "HELP", 
-            "Syntax: HELP [command]\n"
-            "Return help text for all supported commands, or detailed usage for a specific command."
-        },
-    };
-
     std::map<std::string, std::function<void(ClientSession&, const std::vector<std::string>&)>> commandMap = {
         { "USER", [](ClientSession& s, const std::vector<std::string>& args) {
             s.username = args.empty() ? "" : args[0];
@@ -138,7 +41,7 @@ namespace CommandDispatcher{
             Session::replyWithCode(s.socket, ReplyCode::LoggedIn, "User logged in.");
         }},
 
-        { "QUIT", [](ClientSession& s, const std::vector<std::string>& args) {
+        { "QUIT", [](ClientSession& s, const std::vector<std::string>&) {
             Session::replyWithCode(s.socket, ReplyCode::Goodbye, "Service closing control connection.");
             shutdown(s.socket, SD_SEND);
             closesocket(s.socket);
@@ -251,6 +154,7 @@ namespace CommandDispatcher{
         }},
 
         { "PASV", [](ClientSession& s, const std::vector<std::string>&) {
+            clearDataState(s);
             SOCKET dataSock;
             unsigned short port;
             if (!openPassiveDataPort(dataSock, port)) {
@@ -258,54 +162,77 @@ namespace CommandDispatcher{
                 return;
             }
             s.pendingDataSocket = dataSock;
-            s.dataChannelIsPassive = true;
+            s.dataChannelMode = DataChannelMode::Passive;
 
             sockaddr_in localAddr{}; int len = sizeof(localAddr);
             getsockname(s.socket, (sockaddr*)&localAddr, &len); // control socket's local IP = server's IP
             uint32_t serverIp = ntohl(localAddr.sin_addr.s_addr);
 
             std::string body = formatPasvReply(serverIp, port);
-            Session::replyWithCode(s.socket, 227, "Entering Passive Mode (" + body + ").");
+            Session::replyWithCode(s.socket, ReplyCode::EnterPasvMode, "Entering Passive Mode (" + body + ").");
         } },
 
         { "PORT", [](ClientSession& s, const std::vector<std::string>& args) {
+            clearDataState(s);
             sockaddr_in peerAddr{};
-            if (args.empty() || !parsePortCommand(args[0], peerAddr)) {
+            if (args.size() != 1 || !parsePortCommand(args[0], peerAddr)) {
                 Session::replyWithCode(s.socket, ReplyCode::SyntaxError, "Bad PORT argument.");
                 return;
             }
+            if (!portMatchesControlPeer(s, peerAddr)) {
+                Session::replyWithCode(s.socket, ReplyCode::SyntaxError,
+                                       "PORT address must match the control connection.");
+                return;
+            }
             s.pendingPeerAddr = peerAddr;
-            s.dataChannelIsPassive = false;
-            Session::replyWithCode(s.socket, ReplyCode::ActionCompleted, "PORT command successful.");
+            s.dataChannelMode = DataChannelMode::Active;
+            Session::replyWithCode(s.socket, ReplyCode::CommandOkay, "PORT command successful.");
         } },
 
         {"RETR", [](ClientSession& s, const std::vector<std::string>& args) {
             if (args.empty()) { Session::replyWithCode(s.socket, ReplyCode::SyntaxError, ""); return; }
             std::filesystem::path resolved;
             if (!g_pathResolver.resolve(s.currentDir, args[0], resolved) || !std::filesystem::exists(resolved)) {
+                clearDataState(s);
                 Session::replyWithCode(s.socket, ReplyCode::ActionNotTaken, "File not found.");
                 return;
             }
+            if (s.dataChannelMode == DataChannelMode::None) {
+                Session::replyWithCode(s.socket, ReplyCode::CantOpenDataConnection,
+                                       "Use PORT or PASV before RETR.");
+                return;
+            }
 
-            std::unique_ptr<IRdtTransport> transport;
-            if (s.dataChannelIsPassive) {
-                transport = std::make_unique<RdtSender>(s.pendingDataSocket);
-                if (!transport->waitForClientReady()) {
-                    Session::replyWithCode(s.socket, ReplyCode::ActionNotTaken, "Handshake failed.");
-                    return;
-                }
+            std::unique_ptr<RdtSender> transport;
+            const bool passive = s.dataChannelMode == DataChannelMode::Passive;
+            if (passive) {
+                const SOCKET dataSocket = std::exchange(
+                    s.pendingDataSocket, INVALID_SOCKET);
+                transport = std::make_unique<RdtSender>(dataSocket);
             } else {
                 char peerIp[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET, &s.pendingPeerAddr.sin_addr, peerIp, sizeof(peerIp));
                 unsigned short peerPort = ntohs(s.pendingPeerAddr.sin_port);
                 transport = std::make_unique<RdtSender>(peerIp, peerPort);
             }
+            s.dataChannelMode = DataChannelMode::None;
+            s.pendingPeerAddr = {};
+            if (!transport->isValid()) {
+                Session::replyWithCode(s.socket, ReplyCode::CantOpenDataConnection,
+                                       "Could not open data connection.");
+                return;
+            }
 
             DataChannelSession channel(*transport);
 
             Session::replyWithCode(s.socket, ReplyCode::FileStatusOkay, "Opening data connection.");
+            if (passive && !transport->waitForClientReady()) {
+                Session::replyWithCode(s.socket, ReplyCode::TransferAborted,
+                                       "Data handshake failed.");
+                return;
+            }
             bool ok = channel.sendFile(resolved, s.transferMode);
-            Session::replyWithCode(s.socket, ok ? ReplyCode::TransferComplete : ReplyCode::ActionNotTaken,
+            Session::replyWithCode(s.socket, ok ? ReplyCode::TransferComplete : ReplyCode::TransferAborted,
                                     ok ? "Transfer complete." : "Transfer failed.");
         } },
 
@@ -313,26 +240,45 @@ namespace CommandDispatcher{
             if (args.empty()) { Session::replyWithCode(s.socket, ReplyCode::SyntaxError, ""); return; }
             std::filesystem::path resolved;
             if (!g_pathResolver.resolve(s.currentDir, args[0], resolved)) {
+                clearDataState(s);
                 Session::replyWithCode(s.socket, ReplyCode::ActionNotTaken, "Path outside server root.");
                 return;
             }
-
-            std::unique_ptr<IRdtTransport> transport;
-
-            if (s.dataChannelIsPassive) {
-                transport = std::make_unique<RdtReceiver>(s.pendingDataSocket);
+            if (s.dataChannelMode == DataChannelMode::None) {
+                Session::replyWithCode(s.socket, ReplyCode::CantOpenDataConnection,
+                                       "Use PORT or PASV before STOR.");
+                return;
             }
-            else {
-                Session::replyWithCode(s.socket, ReplyCode::ActionNotTaken,
-                    "STOR under Active (PORT) mode is not yet supported.");
+
+            const bool passive = s.dataChannelMode == DataChannelMode::Passive;
+            std::unique_ptr<RdtReceiver> transport;
+            if (passive) {
+                const SOCKET dataSocket = std::exchange(
+                    s.pendingDataSocket, INVALID_SOCKET);
+                transport = std::make_unique<RdtReceiver>(dataSocket);
+            } else {
+                transport = std::make_unique<RdtReceiver>(
+                    static_cast<uint16_t>(0));
+            }
+            const sockaddr_in activePeer = s.pendingPeerAddr;
+            s.dataChannelMode = DataChannelMode::None;
+            s.pendingPeerAddr = {};
+            if (!transport->isValid()) {
+                Session::replyWithCode(s.socket, ReplyCode::CantOpenDataConnection,
+                                       "Could not open data connection.");
                 return;
             }
 
             DataChannelSession channel(*transport);
 
             Session::replyWithCode(s.socket, ReplyCode::FileStatusOkay, "Opening data connection.");
+            if (!passive && !transport->initiateActiveHandshake(activePeer)) {
+                Session::replyWithCode(s.socket, ReplyCode::TransferAborted,
+                                       "Data handshake failed.");
+                return;
+            }
             bool ok = channel.receiveFile(resolved, s.transferMode);
-            Session::replyWithCode(s.socket, ok ? ReplyCode::TransferComplete : ReplyCode::ActionNotTaken,
+            Session::replyWithCode(s.socket, ok ? ReplyCode::TransferComplete : ReplyCode::TransferAborted,
                                     ok ? "Transfer complete." : "Transfer failed.");
         } },
 

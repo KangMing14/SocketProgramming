@@ -4,8 +4,8 @@
 #include <vector>
 #include <cstdint>
 #include <winsock2.h>
-#include "RdtHeader.h"
-#include "TransferMode.h"
+#include "../rdt/RdtHeader.h"
+#include "../common/TransferMode.h"
 
 namespace fs = std::filesystem;
 
@@ -17,7 +17,5 @@ public:
     bool receiveFile(const fs::path& destPath, TransferMode mode = TransferMode::Binary);
 
 private:
-    // The transport protocol handles the actual socket and peer address.
-
     IRdtTransport& transport;
 };

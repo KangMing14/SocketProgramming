@@ -17,6 +17,7 @@ bool parsePortCommand(const std::string& arg, sockaddr_in& outAddr) {
         !inRange(p1) || !inRange(p2)) {
         return false;
     }
+    if (p1 == 0 && p2 == 0) return false;
 
     char ipStr[16];
     sprintf_s(ipStr, "%d.%d.%d.%d", h1, h2, h3, h4);

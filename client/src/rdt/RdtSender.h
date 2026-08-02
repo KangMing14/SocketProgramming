@@ -6,6 +6,8 @@
 #include <ws2tcpip.h>
 #include <stdio.h>
 
+namespace hybridftp::client {
+
 class RdtSender : public IRdtTransport
 {
 private:
@@ -29,11 +31,20 @@ public:
   RdtSender(SOCKET existingSocket, const sockaddr_in &targetAddr,
             int timeoutMs = 500);
 
+  // Active STOR: destination is learned from the server's SYN packet.
+  RdtSender(SOCKET existingSocket, int timeoutMs = 500);
+
   // Destructor closes the socket
   ~RdtSender();
 
   // High-level function: Sends a payload and uses Stop-and-Wait reliability
   // Returns true if successfully ACKed, false if failed after max retries
-  bool sendChunk(uint32_t seqNum, const char* data, size_t len) override;
+  bool sendChunk(uint32_t seqNum, const char* data, size_t len,
+                 bool isFinal = false) override;
   bool receiveNext(uint32_t& outSeqNum, std::vector<char>& outData, bool& outIsFinal) override;
+  bool flush() override { return true; }
+  bool waitForServerReady(const in_addr& expectedServerIp);
+  bool isValid() const noexcept { return udpSocket != INVALID_SOCKET; }
 };
+
+}

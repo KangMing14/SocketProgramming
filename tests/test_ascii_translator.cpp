@@ -69,11 +69,10 @@ void test_full_pipeline_ascii_round_trip() {
     }
 
     FakeRdtTransport transport;
-    sockaddr_in dummy{};
-    DataChannelSession sender(INVALID_SOCKET, dummy, transport);
+    DataChannelSession sender(transport);
     assert(sender.sendFile("mixed_endings.txt", TransferMode::ASCII) == true);
 
-    DataChannelSession receiver(INVALID_SOCKET, dummy, transport);
+    DataChannelSession receiver(transport);
     assert(receiver.receiveFile("mixed_endings_result.txt", TransferMode::ASCII) == true);
 
     std::ifstream result("mixed_endings_result.txt", std::ios::binary);

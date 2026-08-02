@@ -127,64 +127,30 @@ I suspect that because the code: int fieldsParsed = sscanf_s(arg.c_str(), d,%d,%
 
 ---
 
+## Entry 7 — Cross-Module Constant Mismatch Between `MAX_PAYLOAD` and `CHUNK_SIZE`
+ 
+**Issue identified:** While reviewing Member B's RDT header implementation, I noticed the packet checksum field used only `uint16_t` and questioned whether this was suitable compared to SHA-256, and separately noticed `MAX_PAYLOAD` was defined as 1000 while my own `CHUNK_SIZE` was 1024, and suspected this discrepancy could be a real problem worth checking across the codebase.
+ 
+**Prompt (verbatim):**
+> "I just found out the rdt header only used uint16_t for checksum, which I think is not suitable for SHA256 isn't it? And the MAX_PAYLOAD also only 1000, isn't it suppose to be 1024 or is it use for different purpose? If those are really a problems, provide all needed fixes (across the codebase if necessary). Also find out any other existed potential problem due to the mis-match between members."
+ 
+**Raw AI output (summary):** AI confirmed the 16-bit checksum was an intentional, separate per-packet transport check (not a substitute for SHA-256), but confirmed the `MAX_PAYLOAD`/`CHUNK_SIZE` mismatch was a real, severe bug — a stack buffer overflow in `RdtSender::sendChunk` plus silent truncation of every full-size chunk — and provided a centralized-constant fix (`ProtocolConstants.h`) plus a second, independently-found bug: a PASV-mode socket double-bind conflict between `PassiveModeHandler` and `RdtReceiver`.
+ 
+**Refinement / problem-solving:** I directed that the fix apply across every affected file (not just the constant itself), and later verified across two follow-up branch checks that both the constant-unification fix and the socket-ownership fix were correctly applied, catching that the second fix had only landed partially (the command-dispatch wiring wasn't updated to use it) before it was fully resolved.
+ 
+---
+ 
+## Entry 8 — Circular Header Dependency Between `ProtocolConstants.h` and `RdtHeader.h`
+ 
+**Issue identified:** While deriving `HEADER_SIZE` from `sizeof(RdtHeader)` in the shared constants header, I found that `ProtocolConstants.h` needed to include `RdtHeader.h` for the struct size, while `RdtHeader.h` needed to include `ProtocolConstants.h` for `MAX_PAYLOAD` — a circular include that caused a compile error. I applied a temporary hardcoded value as a workaround and asked for a proper solution.
+ 
+**Prompt (verbatim):**
+> "There's also a problem where at RdtHeader.h, I need to include ProtocolConstants.h for the MAX_PAYLOAD, but in ProtocolConstants.h, I also need to include RdtHeader.h for sizeof(RdtHeader) which lead to error so I define it at 16 as a temporary solution, provide some proper way to handle this."
+ 
+**Raw AI output (summary):** AI explained why the intuitive fixes (forward declaration, `#pragma once` alone) don't resolve a true circular dependency, and proposed the correct structural fix: recognizing `HEADER_SIZE` as a value derived from `RdtHeader` itself, and therefore defining it directly inside `RdtHeader.h` immediately after the struct, rather than in the separate constants file — eliminating the cycle entirely rather than papering over it with a hardcoded literal.
+ 
+**Refinement / problem-solving:** I had already identified the root cause (the circular include) and applied a working, if temporary, fix myself before asking for the permanent solution, then removed the hardcoded `16` in favor of the compiler-derived `sizeof(RdtHeader)` value.
+ 
+---
+
 *End of log excerpt — additional entries to be appended as development continues.*
-
-
-### GenAI Log Entry #02
-Date: 19/07/2026
-Team member: Do Minh Khang - Member C
-Module: Get permissions string for LIST
-
-**Prompt used:**
-"How to change std::filesystem::status().permissions() to Unix ls -l long-format listing for FTP LIST"
-
-**Raw AI output (verbatim, or summarized with a note if long):**
-```cpp
-#include <iostream>
-#include <filesystem>
-#include <string>
-
-namespace fs = std::filesystem;
-
-std::string get_unix_permission_string(fs::perms p) {
-    std::string s = "---------";
-    
-    if ((p & fs::perms::owner_read)   != fs::perms::none) s[0] = 'r';
-    if ((p & fs::perms::owner_write)  != fs::perms::none) s[1] = 'w';
-    if ((p & fs::perms::owner_exec)   != fs::perms::none) s[2] = 'x';
-    
-    if ((p & fs::perms::group_read)   != fs::perms::none) s[3] = 'r';
-    if ((p & fs::perms::group_write)  != fs::perms::none) s[4] = 'w';
-    if ((p & fs::perms::group_exec)   != fs::perms::none) s[5] = 'x';
-    
-    if ((p & fs::perms::others_read)  != fs::perms::none) s[6] = 'r';
-    if ((p & fs::perms::others_write) != fs::perms::none) s[7] = 'w';
-    if ((p & fs::perms::others_exec)  != fs::perms::none) s[8] = 'x';
-    
-    return s;
-}
-
-std::string get_ftp_list_format(const fs::path& path) {
-    std::error_code ec;
-    fs::file_status status = fs::status(path, ec);
-    
-    if (ec) {
-        return "d---------";
-    }
-
-    char type_char = '-';
-    if (fs::is_directory(status))      type_char = 'd';
-    else if (fs::is_symlink(status))   type_char = 'l';
-    else if (fs::is_character_file(status)) type_char = 'c';
-    else if (fs::is_block_file(status))     type_char = 'b';
-    else if (fs::is_fifo(status))       type_char = 'p';
-    else if (fs::is_socket(status))     type_char = 's';
-
-    return type_char + get_unix_permission_string(status.permissions());
-}
-```
-
-**Refinement performed:**
-- AI seperate the fuction into 2 smaller functions. We merge them into one because the fuction only called once at `LIST` command
-- AI using too many `else if` for checking file type. Take advance of the `file_status`, we switch from `if else` to `switch(status.type())`
-

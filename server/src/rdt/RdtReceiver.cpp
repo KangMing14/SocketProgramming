@@ -4,6 +4,36 @@
 
 #include "../common/ProtocolConstants.h"
 
+#ifndef CHAOS_MODE
+#define CHAOS_MODE 0
+#endif
+
+namespace {
+DWORD receiverIdleTimeout() {
+  return CHAOS_MODE ? CHAOS_DATA_IDLE_TIMEOUT_MS : DATA_IDLE_TIMEOUT_MS;
+}
+
+bool sameEndpoint(const sockaddr_in& left, const sockaddr_in& right) {
+  return left.sin_family == right.sin_family &&
+         left.sin_port == right.sin_port &&
+         left.sin_addr.s_addr == right.sin_addr.s_addr;
+}
+
+bool hasValidChecksum(const char* bytes, int length) {
+  if (length < static_cast<int>(HEADER_SIZE)) return false;
+  char checksumBuf[HEADER_SIZE + MAX_PAYLOAD];
+  memcpy(checksumBuf, bytes, length);
+  checksumBuf[13] = 0;
+  checksumBuf[14] = 0;
+
+  uint16_t receivedChecksum = 0;
+  memcpy(&receivedChecksum, bytes + 13, sizeof(receivedChecksum));
+  receivedChecksum = ntohs(receivedChecksum);
+  return internetChecksum(reinterpret_cast<const uint8_t*>(checksumBuf), length) ==
+         receivedChecksum;
+}
+}
+
 // Constructor: creates a UDP socket and BINDS it to a port to listen
 RdtReceiver::RdtReceiver(uint16_t listenPort) {
   // Step 1: Create a UDP socket — same as sender
@@ -15,7 +45,7 @@ RdtReceiver::RdtReceiver(uint16_t listenPort) {
   }
 
   // Step 2: Set the timeout so receiveData() doesn't block forever
-  DWORD timeout = 5000; // 5-second receive timeout
+  DWORD timeout = receiverIdleTimeout();
   setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout,
              sizeof(timeout));
 
@@ -45,10 +75,80 @@ RdtReceiver::RdtReceiver(uint16_t listenPort) {
 RdtReceiver::RdtReceiver(SOCKET existingSocket)
     : udpSocket(existingSocket) {
   // Just apply the timeout — socket is already created and bound by caller.
-  DWORD timeout = 5000;
+  DWORD timeout = receiverIdleTimeout();
   setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout,
              sizeof(timeout));
   std::cout << "[Receiver] Initialized with existing PASV socket." << std::endl;
+}
+
+bool RdtReceiver::initiateActiveHandshake(const sockaddr_in& expectedPeer) {
+  if (!isValid()) return false;
+
+  peerAddr = expectedPeer;
+  peerKnown = true;
+
+  RdtHeader syn{};
+  syn.seq_num = 0;
+  syn.flags = FLAG_SYN;
+  syn.window_size = 1;
+
+  char synBuffer[HEADER_SIZE]{};
+  serializeHeader(syn, synBuffer);
+  syn.checksum = internetChecksum(
+      reinterpret_cast<const uint8_t*>(synBuffer), HEADER_SIZE);
+  serializeHeader(syn, synBuffer);
+
+  DWORD handshakeTimeout = HANDSHAKE_TIMEOUT_MS;
+  setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO,
+             reinterpret_cast<const char*>(&handshakeTimeout),
+             sizeof(handshakeTimeout));
+
+  for (int attempt = 0; attempt < HANDSHAKE_MAX_RETRIES; ++attempt) {
+    if (sendto(udpSocket, synBuffer, static_cast<int>(HEADER_SIZE), 0,
+               reinterpret_cast<const sockaddr*>(&peerAddr),
+               sizeof(peerAddr)) == SOCKET_ERROR) {
+      return false;
+    }
+
+    char receiveBuffer[HEADER_SIZE + MAX_PAYLOAD];
+    sockaddr_in from{};
+    int fromLength = sizeof(from);
+    const int received = recvfrom(
+        udpSocket, receiveBuffer, sizeof(receiveBuffer), 0,
+        reinterpret_cast<sockaddr*>(&from), &fromLength);
+    if (received == SOCKET_ERROR) {
+      if (WSAGetLastError() == WSAETIMEDOUT) continue;
+      return false;
+    }
+    if (!sameEndpoint(from, peerAddr) ||
+        !hasValidChecksum(receiveBuffer, received)) {
+      continue;
+    }
+
+    const RdtHeader header = deserializeHeader(receiveBuffer);
+    if ((header.flags & FLAG_ACK) && header.ack_num == syn.seq_num) {
+      DWORD idleTimeout = receiverIdleTimeout();
+      setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO,
+                 reinterpret_cast<const char*>(&idleTimeout),
+                 sizeof(idleTimeout));
+      return true;
+    }
+    if (header.flags & FLAG_DATA) {
+      pendingDatagram.assign(receiveBuffer, receiveBuffer + received);
+      pendingFrom = from;
+      DWORD idleTimeout = receiverIdleTimeout();
+      setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO,
+                 reinterpret_cast<const char*>(&idleTimeout),
+                 sizeof(idleTimeout));
+      return true;
+    }
+  }
+
+  DWORD idleTimeout = receiverIdleTimeout();
+  setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO,
+             reinterpret_cast<const char*>(&idleTimeout), sizeof(idleTimeout));
+  std::cerr << "[Receiver] Active handshake timed out." << std::endl;
+  return false;
 }
 
 // Destructor: close the socket
@@ -94,100 +194,97 @@ void RdtReceiver::sendAck(uint32_t ack_num, sockaddr_in &clientAddr) {
 //   duplicate
 bool RdtReceiver::receiveNext(uint32_t &outSeqNum, std::vector<char> &outData,
                               bool &outIsFinal) {
+  const int WINDOW_SIZE = 10;
+
+  // 1. Check if the expected packet is already buffered
+  auto it = outOfOrderBuffer.find(expected_seq);
+  if (it != outOfOrderBuffer.end()) {
+    outData = it->second.first;
+    outIsFinal = it->second.second;
+    outSeqNum = expected_seq;
+    outOfOrderBuffer.erase(it);
+    expected_seq++;
+    return true;
+  }
+
   char recvBuf[HEADER_SIZE + MAX_PAYLOAD];
   sockaddr_in clientAddr{};
   int clientLen = sizeof(clientAddr);
 
   while (true) {
-    // Block here until a UDP packet arrives (or the timeout fires)
-    int n = recvfrom(udpSocket, recvBuf, sizeof(recvBuf), 0,
-                     (sockaddr *)&clientAddr, &clientLen);
+    int n = 0;
+    if (!pendingDatagram.empty()) {
+      n = static_cast<int>(pendingDatagram.size());
+      memcpy(recvBuf, pendingDatagram.data(), pendingDatagram.size());
+      clientAddr = pendingFrom;
+      pendingDatagram.clear();
+    } else {
+      n = recvfrom(udpSocket, recvBuf, sizeof(recvBuf), 0,
+                   (sockaddr *)&clientAddr, &clientLen);
+    }
 
     if (n == SOCKET_ERROR) {
       int err = WSAGetLastError();
       if (err == WSAETIMEDOUT) {
-        std::cerr << "[Receiver] Timeout — no data received." << std::endl;
-      } else {
-        std::cerr << "[Receiver] recvfrom() error: " << err << std::endl;
+        std::cerr << "[Receiver] Timed out waiting for DATA." << std::endl;
+        return false;
       }
+      std::cerr << "[Receiver] recvfrom() error: " << err << std::endl;
       return false;
     }
 
-    if (n < HEADER_SIZE) {
-      std::cerr << "[Receiver] Packet too small, ignoring." << std::endl;
+    if (n < static_cast<int>(HEADER_SIZE)) continue;
+
+    if (!hasValidChecksum(recvBuf, n)) {
+      std::cerr << "[Receiver] Checksum MISMATCH, dropping." << std::endl;
       continue;
     }
 
-    // --- GOLDEN RULE #1: Verify checksum FIRST ---
-    // We verify by computing the checksum over the RAW received bytes.
-    // We need to zero the checksum field in the buffer first for this to work.
-    char checksumBuf[HEADER_SIZE + MAX_PAYLOAD];
-    memcpy(checksumBuf, recvBuf, n);
-
-    // Zero out the checksum field in our copy (bytes 13 and 14 of the header)
-    checksumBuf[13] = 0;
-    checksumBuf[14] = 0;
-
-    uint16_t computed = internetChecksum((const uint8_t *)checksumBuf, n);
-
-    // Extract the checksum that was sent in the header
-    uint16_t received_checksum;
-    memcpy(&received_checksum, recvBuf + 13, 2);
-    received_checksum = ntohs(received_checksum);
-
-    if (computed != received_checksum) {
-      // SILENT DROP — do NOT send any reply. The sender's timer will
-      // retransmit.
-      std::cerr << "[Receiver] Checksum MISMATCH — packet corrupted, dropping "
-                   "silently."
-                << std::endl;
-      continue; // Loop and wait for the retransmission
-    }
-
-    // --- Checksum passed — Deserialize the header ---
     RdtHeader header = deserializeHeader(recvBuf);
-
-    // Make sure this is a DATA packet (not some stray ACK we accidentally
-    // received)
-    if (!(header.flags & FLAG_DATA)) {
-      std::cerr << "[Receiver] Packet is not a DATA packet, ignoring."
-                << std::endl;
-      continue;
+    if (!(header.flags & FLAG_DATA)) continue;
+    if (peerKnown && !sameEndpoint(clientAddr, peerAddr)) continue;
+    if (!peerKnown) {
+      peerAddr = clientAddr;
+      peerKnown = true;
     }
 
-    // --- Extract the payload from the buffer ---
-    uint16_t payload_len = header.payload_len;
-    if (payload_len > MAX_PAYLOAD)
-      payload_len = MAX_PAYLOAD;
-
-    int actual_payload = n - HEADER_SIZE;
-    if (payload_len > actual_payload)
-      payload_len = actual_payload;
-
-    // --- GOLDEN RULE #2: ALWAYS send an ACK back (even for duplicates!) ---
+    // ALWAYS ACK DATA PACKETS IN SELECTIVE REPEAT
     sendAck(header.seq_num, clientAddr);
 
-    // Check if this is a duplicate packet
-    if (seen_seq_nums.find(header.seq_num) != seen_seq_nums.end()) {
-      std::cerr << "[Receiver] Duplicate packet seq=" << header.seq_num
-                << ", re-ACKed but ignoring payload." << std::endl;
-      continue;
+    uint16_t payload_len = header.payload_len;
+    if (payload_len > MAX_PAYLOAD) payload_len = MAX_PAYLOAD;
+    int actual_payload = n - HEADER_SIZE;
+    if (payload_len > actual_payload) payload_len = actual_payload;
+
+    if (header.seq_num == expected_seq) {
+      // In-order packet
+      outData.resize(payload_len);
+      memcpy(outData.data(), recvBuf + HEADER_SIZE, payload_len);
+      outSeqNum = header.seq_num;
+      outIsFinal = (header.flags & FLAG_FIN) != 0;
+      expected_seq++;
+      return true;
+    } else if (header.seq_num > expected_seq) {
+      // Out-of-order packet (future)
+      // Enforce strict upper bound to prevent memory exhaustion
+      if (header.seq_num <= expected_seq + WINDOW_SIZE) {
+        if (outOfOrderBuffer.find(header.seq_num) == outOfOrderBuffer.end()) {
+          std::vector<char> data(payload_len);
+          memcpy(data.data(), recvBuf + HEADER_SIZE, payload_len);
+          bool isFin = (header.flags & FLAG_FIN) != 0;
+          outOfOrderBuffer[header.seq_num] = std::make_pair(data, isFin);
+        }
+      } else {
+        std::cerr << "[Receiver] Packet seq=" << header.seq_num << " is too far ahead (>" << expected_seq + WINDOW_SIZE << "), dropping." << std::endl;
+      }
+    } else {
+      // Duplicate packet (past)
+      // Already ACKed it above, just ignore
     }
-
-    // New packet, record its sequence number
-    seen_seq_nums.insert(header.seq_num);
-
-    outData.resize(payload_len);
-    memcpy(outData.data(), recvBuf + HEADER_SIZE, payload_len);
-
-    outSeqNum = header.seq_num;
-    outIsFinal = (header.flags & FLAG_FIN) != 0;
-
-    return true; // Return true on success
   }
 }
 
-bool RdtReceiver::sendChunk(uint32_t seqNum, const char *data, size_t len) {
+bool RdtReceiver::sendChunk(uint32_t, const char*, size_t, bool) {
   // RdtReceiver does not send data chunks.
   return false;
 }

@@ -12,13 +12,15 @@ void test_send_then_receive_round_trip() {
     createTestFile("dc_source.bin", 2600);
 
     FakeRdtTransport transport;
-    sockaddr_in dummyAddr{};
-    DataChannelSession sender(INVALID_SOCKET, dummyAddr, transport);
+    //sockaddr_in dummyAddr{};
+    //DataChannelSession sender(INVALID_SOCKET, dummyAddr, transport);
+    DataChannelSession sender(transport);
 
     assert(sender.sendFile("dc_source.bin") == true);
     assert(!transport.sentChunks.empty());
 
-    DataChannelSession receiver(INVALID_SOCKET, dummyAddr, transport);
+    //DataChannelSession receiver(INVALID_SOCKET, dummyAddr, transport);
+    DataChannelSession receiver(transport);
     assert(receiver.receiveFile("dc_result.bin") == true);
 
     assert(filesAreIdentical("dc_source.bin", "dc_result.bin"));
