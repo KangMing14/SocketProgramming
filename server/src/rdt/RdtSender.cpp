@@ -126,7 +126,7 @@ void RdtSender::applyCongestionDecrease() {
 #if RDT_DEBUG
     double previousCwnd = cwnd;
 #endif
-    cwnd = std::max(MIN_CWND, cwnd / 2.0);
+    cwnd = (std::max)(MIN_CWND, cwnd / 2.0);
     cleanAcks = 0;
 
     timeoutMs = std::clamp(

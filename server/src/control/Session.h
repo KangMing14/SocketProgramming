@@ -37,6 +37,7 @@ struct ClientSession {
 
 namespace Session {
     void replyWithCode(SOCKET, int, std::string);
+    void multilineReplyWithCode(SOCKET, int, std::string);
     SOCKET initializeSession();
     void handleClient(SOCKET);
     void runSession();

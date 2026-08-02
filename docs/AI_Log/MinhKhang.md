@@ -153,4 +153,57 @@ I suspect that because the code: int fieldsParsed = sscanf_s(arg.c_str(), d,%d,%
  
 ---
 
+## Entry 9 — Silent Hang in the Chaos Integrity Test
+ 
+**Issue identified:** After implementing the end-to-end chaos test on my own branch, I noticed the test ran normally, printing repeated "[Receiver] ACK sent for seq=X" messages, then stopped producing any console output at all — while the process itself remained running rather than crashing or exiting.
+ 
+**Prompt (verbatim):**
+> "Regarding the chaos test, I just implemented the test in this branch https://github.com/KangMing14/SocketProgramming/tree/feat/add-client-side-file-handler but the test run normally until this massage:  [Receiver] ACK sent for seq=<some number>. This massage did also appear before in the console but until 1 time it just stop to print anything to console (the exe still run tho). Could you check what happen."
+ 
+**Raw AI output (summary):** AI pulled the actual branch, traced the Selective Repeat sender/receiver logic, and identified two real bugs: `MAX_RETRIES` was defined but never enforced in the sender's retry loop (allowing infinite silent retries), and the receiver's `recvfrom` timeout loop looped forever on timeout with no bound and no log output — together explaining the exact "still running, nothing printing" symptom. Provided a fix enforcing retry limits with explicit failure reporting, plus a bounded, logged receiver timeout.
+ 
+**Refinement / problem-solving:** I provided the precise, reproducible symptom (which log line appeared last, that the process kept running) rather than just reporting "it hangs," which let the diagnosis proceed directly from code tracing rather than guesswork.
+ 
+---
+ 
+## Entry 10 — Shared `ftp_core` CMake Target Causing Symbol Redefinition Between Client and Server
+ 
+**Issue identified:** As client-side files accumulated with the same class names as their server-side counterparts (by design, per the team's duplication decision), I recognized that the single shared `ftp_core` CMake library target would cause redefinition conflicts once both sides were linked together.
+ 
+**Prompt (verbatim):**
+> "Right now, the CMake create a single ftp_core for both Client and Server, which lead to many re-definition and conflict, how can I resolve it?"
+ 
+**Raw AI output (summary):** AI confirmed the root cause (one library compiling both `server/src/control/Session.cpp` and `client/src/control/Session.cpp`, both defining a class named `Session`, plus ambiguous flat include paths) and restructured the build into two independent static libraries (`server_core`/`client_core`), each scoped strictly to its own source tree, with a shared header-only `common/` directory for genuinely non-conflicting constants.
+ 
+**Refinement / problem-solving:** I identified this as a forward-looking structural risk before it caused an actual build failure, based on recognizing the pattern from the team's own file-duplication convention, rather than waiting to hit the error directly.
+ 
+---
+ 
+## Entry 11 — Teammate's Independently-Built Client `DataChannelSession` Conflicting With My Own
+ 
+**Issue identified:** A teammate performed a substantial rework on his own branch and, working independently, wrote his own client-side `DataChannelSession` rather than using the one I had built, creating two competing implementations.
+ 
+**Prompt (verbatim):**
+> "My teammate just have a grand rework for a codebase, because he do in his own branch so he did not use my client datachannelsession but create his own. https://github.com/KangMing14/SocketProgramming/tree/hwng-PTC-Engineer is the branch he just worked on, explain what changes in the latest commit and their impact, and compare it agaist what have we done so far, especially about the changes related to my work."
+ 
+**Raw AI output (summary):** AI pulled the branch and did a direct line-by-line comparison, finding the teammate's version correctly handled two real gaps mine did not (explicit `isFinal` marking via lookahead, and an empty-file edge case my version would have hung on), tied both to a `sendChunk` interface change I hadn't caught up to, and recommended adopting his version after verifying the specific gaps with a test.
+ 
+**Refinement / problem-solving:** I directed the comparison specifically at "changes related to my work" rather than a generic branch review, and followed through by having the empty-file and `isFinal` gaps verified with a real test before deciding to adopt the teammate's implementation, rather than assuming the comparison alone was sufficient grounds to switch.
+ 
+---
+ 
+## Entry 12 — Unnoticed Changes to My Own Server-Side Files
+ 
+**Issue identified:** While reviewing the teammate's rework, I noticed my own server-side files had also been modified without my direct involvement, and needed to know exactly what changed and whether any of it was critical before proceeding.
+ 
+**Prompt (verbatim):**
+> "I am about to change to his code to work entirely, I also notice that even my server side code have some changes, what are those and is it critical?"
+ 
+**Raw AI output (summary):** AI checked commit history per-file across every file under my ownership, confirming most were untouched, but that `DataChannelSession.cpp` (server) had been substantially rewritten by the same teammate to apply the identical `isFinal`/empty-file fix found on the client side — assessed as a necessary, correctly-implemented change, but flagged as code I now needed to personally review for viva readiness since I hadn't authored the current version.
+ 
+**Refinement / problem-solving:** I treated "did something change" and "is it safe" as two separate questions worth asking explicitly, rather than assuming a passing build meant no review was needed.
+ 
+---
+ 
 *End of log excerpt — additional entries to be appended as development continues.*
+ 
