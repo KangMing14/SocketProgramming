@@ -21,7 +21,9 @@
 #include "CheckSum.h"
 #include "../common/ProtocolConstants.h"
 
+#ifdef _MSC_VER
 #pragma comment(lib, "ws2_32.lib")
+#endif
 
 namespace {
 

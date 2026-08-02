@@ -123,8 +123,10 @@ void RdtSender::updateRtt(double sampleRttMs) {
 }
 
 void RdtSender::applyCongestionDecrease() {
+#if RDT_DEBUG
     double previousCwnd = cwnd;
-    cwnd = max(MIN_CWND, cwnd / 2.0);
+#endif
+    cwnd = std::max(MIN_CWND, cwnd / 2.0);
     cleanAcks = 0;
 
     timeoutMs = std::clamp(
@@ -252,7 +254,7 @@ bool RdtSender::pollAcksAndRetransmit(bool blocking)
         break;
       }
 
-      if (n >= HEADER_SIZE)
+      if (n >= static_cast<int>(HEADER_SIZE))
       {
         char checksumBuf[HEADER_SIZE + MAX_PAYLOAD];
         memcpy(checksumBuf, recvBuf, n);
@@ -365,7 +367,7 @@ bool RdtSender::pollAcksAndRetransmit(bool blocking)
         memset(&rawPkt, 0, sizeof(rawPkt));
         rawPkt.header.seq_num = pkt.seq_num;
         rawPkt.header.ack_num = 0;
-        rawPkt.header.flags = FLAG_DATA;
+        rawPkt.header.flags = FLAG_DATA | (pkt.is_final ? FLAG_FIN : 0);
         rawPkt.header.window_size = static_cast<uint16_t>(effectiveWindowSize());
         rawPkt.header.payload_len = static_cast<uint16_t>(pkt.data.size());
         rawPkt.header.reserved = 0;
@@ -393,9 +395,10 @@ bool RdtSender::pollAcksAndRetransmit(bool blocking)
 }
 
 // PUBLIC: High-level Selective Repeat send
-bool RdtSender::sendChunk(uint32_t seqNum, const char *data, size_t len)
+bool RdtSender::sendChunk(uint32_t seqNum, const char *data, size_t len,
+                          bool isFinal)
 {
-  if (len > MAX_PAYLOAD)
+  if (len > MAX_PAYLOAD || (len > 0 && data == nullptr))
   {
     std::cerr << "[Sender] REJECTED: chunk length " << len
               << " exceeds MAX_PAYLOAD (" << MAX_PAYLOAD << ")." << std::endl;
@@ -413,17 +416,17 @@ bool RdtSender::sendChunk(uint32_t seqNum, const char *data, size_t len)
   memset(&rawPkt, 0, sizeof(rawPkt));
   rawPkt.header.seq_num = seqNum;
   rawPkt.header.ack_num = 0;
-  rawPkt.header.flags = FLAG_DATA;
+  rawPkt.header.flags = FLAG_DATA | (isFinal ? FLAG_FIN : 0);
   rawPkt.header.window_size = static_cast<uint16_t>(effectiveWindowSize());
   rawPkt.header.payload_len = static_cast<uint16_t>(len);
   rawPkt.header.reserved = 0;
   rawPkt.header.checksum = 0;
-  memcpy(rawPkt.payload, data, len);
+  if (len > 0) memcpy(rawPkt.payload, data, len);
 
   char tempBuf[HEADER_SIZE + MAX_PAYLOAD];
   memset(tempBuf, 0, sizeof(tempBuf));
   serializeHeader(rawPkt.header, tempBuf);
-  memcpy(tempBuf + HEADER_SIZE, rawPkt.payload, len);
+  if (len > 0) memcpy(tempBuf + HEADER_SIZE, rawPkt.payload, len);
   rawPkt.header.checksum = internetChecksum((const uint8_t *)tempBuf, HEADER_SIZE + len);
 
 #if RDT_DEBUG
@@ -438,7 +441,8 @@ bool RdtSender::sendChunk(uint32_t seqNum, const char *data, size_t len)
   // 3. Add packet to window
   InFlightPacket pkt;
   pkt.seq_num = seqNum;
-  pkt.data.assign(data, data + len);
+  if (len > 0) pkt.data.assign(data, data + len);
+  pkt.is_final = isFinal;
   pkt.sent_time = actualSendTime;
   pkt.acked = false;
   pkt.retransmitted = false;
@@ -461,7 +465,7 @@ bool RdtSender::flush()
   return true;
 }
 
-bool RdtSender::receiveNext(uint32_t &outSeqNum, std::vector<char> &outData, bool &outIsFinal)
+bool RdtSender::receiveNext(uint32_t&, std::vector<char>&, bool&)
 {
   // RdtSender does not receive data chunks.
   return false;
@@ -474,7 +478,12 @@ bool RdtSender::waitForClientReady()
   sockaddr_in clientAddr{};
   int clientLen = sizeof(clientAddr);
 
-  while (true)
+  DWORD handshakeTimeout = HANDSHAKE_TIMEOUT_MS;
+  setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO,
+             reinterpret_cast<const char*>(&handshakeTimeout),
+             sizeof(handshakeTimeout));
+
+  for (int attempt = 0; attempt < HANDSHAKE_MAX_RETRIES; ++attempt)
   {
     int n = recvfrom(udpSocket, recvBuf, sizeof(recvBuf), 0,
                      (sockaddr *)&clientAddr, &clientLen);
@@ -484,14 +493,13 @@ bool RdtSender::waitForClientReady()
       int err = WSAGetLastError();
       if (err == WSAETIMEDOUT)
       {
-        // Just keep waiting if it times out
         continue;
       }
       std::cerr << "[Sender] recvfrom() error: " << err << std::endl;
       return false;
     }
 
-    if (n < HEADER_SIZE)
+    if (n < static_cast<int>(HEADER_SIZE))
       continue;
 
     // Verify Checksum
@@ -535,4 +543,7 @@ bool RdtSender::waitForClientReady()
       return true;
     }
   }
+
+  std::cerr << "[Sender] Timed out waiting for client SYN." << std::endl;
+  return false;
 }

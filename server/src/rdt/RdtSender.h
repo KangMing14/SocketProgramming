@@ -41,6 +41,7 @@ private:
   struct InFlightPacket {
       uint32_t seq_num;
       std::vector<char> data;
+      bool is_final;
       std::chrono::steady_clock::time_point sent_time;
       bool acked;
       bool retransmitted;
@@ -77,8 +78,10 @@ public:
 
   // High-level function: Sends a payload and uses Stop-and-Wait reliability
   // Returns true if successfully ACKed, false if failed after max retries
-  bool sendChunk(uint32_t seqNum, const char* data, size_t len) override;
+  bool sendChunk(uint32_t seqNum, const char* data, size_t len,
+                 bool isFinal = false) override;
   bool receiveNext(uint32_t& outSeqNum, std::vector<char>& outData, bool& outIsFinal) override;
-  bool waitForClientReady() override;
+  bool waitForClientReady();
   bool flush() override;
+  bool isValid() const noexcept { return udpSocket != INVALID_SOCKET; }
 };

@@ -1,3 +1,2 @@
 #pragma once
-
-enum class TransferMode { Binary, ASCII };
+#include "../../../shared/protocol/TransferMode.h"

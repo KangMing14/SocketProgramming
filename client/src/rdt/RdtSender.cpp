@@ -2,6 +2,8 @@
 #include <cstring>
 #include <iostream>
 
+namespace hybridftp::client {
+
 #define MAX_RETRIES 10
 #define HEADER_SIZE 16
 
@@ -38,13 +40,20 @@ RdtSender::RdtSender(const std::string &targetIp, uint16_t targetPort,
 // server's PassiveModeHandler. Does NOT call socket() or connect().
 RdtSender::RdtSender(SOCKET existingSocket, const sockaddr_in &targetAddr,
                      int timeoutMs)
-    : timeoutMs(timeoutMs), udpSocket(existingSocket), destAddr(targetAddr)
+    : udpSocket(existingSocket), destAddr(targetAddr), timeoutMs(timeoutMs)
 {
   // Just apply the timeout — everything else is already set up by the caller.
   DWORD timeout = static_cast<DWORD>(timeoutMs);
   setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout,
              sizeof(timeout));
   std::cout << "[Sender] Initialized with existing PASV socket." << std::endl;
+}
+
+RdtSender::RdtSender(SOCKET existingSocket, int timeoutMs)
+    : udpSocket(existingSocket), destAddr{}, timeoutMs(timeoutMs) {
+  DWORD timeout = static_cast<DWORD>(timeoutMs);
+  setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO,
+             reinterpret_cast<const char*>(&timeout), sizeof(timeout));
 }
 
 // Destructor: always close the socket to free up OS resources
@@ -159,29 +168,31 @@ bool RdtSender::waitForAck(uint32_t expected_ack_num)
 
 // PUBLIC: High-level Stop-and-Wait send
 // Builds the packet, sends it, and retransmits on timeout until ACKed
-bool RdtSender::sendChunk(uint32_t seqNum, const char* data, size_t len)
+bool RdtSender::sendChunk(uint32_t seqNum, const char* data, size_t len,
+                          bool isFinal)
 {
+  if (len > MAX_PAYLOAD || (len > 0 && data == nullptr)) return false;
   // --- Build the packet ---
   RdtPacket packet;
   memset(&packet, 0, sizeof(packet));
 
   packet.header.seq_num = seqNum;
   packet.header.ack_num = 0;
-  packet.header.flags = FLAG_DATA;
+  packet.header.flags = FLAG_DATA | (isFinal ? FLAG_FIN : 0);
   packet.header.window_size = 1; // Stop-and-Wait: window of 1
   packet.header.payload_len = static_cast<uint16_t>(len);
   packet.header.reserved = 0;
   packet.header.checksum = 0; // Zero out before calculating
 
   // Copy the file data into the payload slot
-  memcpy(packet.payload, data, len);
+  if (len > 0) memcpy(packet.payload, data, len);
 
   // --- Calculate Checksum over the entire packet (header + payload) ---
   // First serialize the header with checksum=0 into a temp buffer
   char tempBuf[HEADER_SIZE + MAX_PAYLOAD];
   memset(tempBuf, 0, sizeof(tempBuf));
   serializeHeader(packet.header, tempBuf);
-  memcpy(tempBuf + HEADER_SIZE, packet.payload, len);
+  if (len > 0) memcpy(tempBuf + HEADER_SIZE, packet.payload, len);
 
   // Compute checksum over [header bytes + payload bytes]
   packet.header.checksum =
@@ -208,7 +219,68 @@ bool RdtSender::sendChunk(uint32_t seqNum, const char* data, size_t len)
   return false;
 }
 
-bool RdtSender::receiveNext(uint32_t& outSeqNum, std::vector<char>& outData, bool& outIsFinal) {
+bool RdtSender::receiveNext(uint32_t&, std::vector<char>&, bool&) {
     // RdtSender does not receive data chunks.
     return false;
+}
+
+bool RdtSender::waitForServerReady(const in_addr& expectedServerIp) {
+  if (!isValid()) return false;
+
+  DWORD timeout = HANDSHAKE_TIMEOUT_MS;
+  setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO,
+             reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+
+  for (int attempt = 0; attempt < HANDSHAKE_MAX_RETRIES; ++attempt) {
+    char receiveBuffer[HEADER_SIZE + MAX_PAYLOAD];
+    sockaddr_in from{};
+    int fromLength = sizeof(from);
+    const int received = recvfrom(
+        udpSocket, receiveBuffer, sizeof(receiveBuffer), 0,
+        reinterpret_cast<sockaddr*>(&from), &fromLength);
+    if (received == SOCKET_ERROR) {
+      if (WSAGetLastError() == WSAETIMEDOUT) continue;
+      return false;
+    }
+    if (received < static_cast<int>(HEADER_SIZE) ||
+        from.sin_addr.s_addr != expectedServerIp.s_addr) {
+      continue;
+    }
+
+    char checksumBuffer[HEADER_SIZE + MAX_PAYLOAD];
+    memcpy(checksumBuffer, receiveBuffer, received);
+    checksumBuffer[13] = 0;
+    checksumBuffer[14] = 0;
+    uint16_t receivedChecksum = 0;
+    memcpy(&receivedChecksum, receiveBuffer + 13, sizeof(receivedChecksum));
+    receivedChecksum = ntohs(receivedChecksum);
+    if (internetChecksum(reinterpret_cast<const uint8_t*>(checksumBuffer), received) !=
+        receivedChecksum) {
+      continue;
+    }
+
+    const RdtHeader syn = deserializeHeader(receiveBuffer);
+    if (!(syn.flags & FLAG_SYN)) continue;
+    destAddr = from;
+
+    RdtHeader ack{};
+    ack.ack_num = syn.seq_num;
+    ack.flags = FLAG_ACK;
+    ack.window_size = 1;
+    char ackBuffer[HEADER_SIZE]{};
+    serializeHeader(ack, ackBuffer);
+    ack.checksum = internetChecksum(
+        reinterpret_cast<const uint8_t*>(ackBuffer), HEADER_SIZE);
+    serializeHeader(ack, ackBuffer);
+
+    DWORD dataTimeout = static_cast<DWORD>(timeoutMs);
+    setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO,
+               reinterpret_cast<const char*>(&dataTimeout), sizeof(dataTimeout));
+    return sendto(udpSocket, ackBuffer, static_cast<int>(HEADER_SIZE), 0,
+                  reinterpret_cast<const sockaddr*>(&destAddr),
+                  sizeof(destAddr)) != SOCKET_ERROR;
+  }
+  return false;
+}
+
 }

@@ -1,5 +1,7 @@
 #include "ChunkedFileReader.h"
 
+namespace hybridftp::client {
+
 ChunkedFileReader::ChunkedFileReader(const fs::path& filePath)
     : stream(filePath, std::ios::binary), totalSize(0) {
     std::error_code ec;
@@ -16,4 +18,6 @@ bool ChunkedFileReader::nextChunk(std::vector<char>& chunk) {
     size_t bytesRead = static_cast<size_t>(stream.gcount());
     chunk.resize(bytesRead);
     return bytesRead > 0;
+}
+
 }

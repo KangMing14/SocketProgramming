@@ -2,6 +2,8 @@
 #include <ws2tcpip.h>
 #include <cstdio>
 
+namespace hybridftp::client {
+
 bool parsePasvReply(const std::string& replyLine, sockaddr_in& outAddr) {
     size_t openParen = replyLine.find('(');
     size_t closeParen = replyLine.find(')', openParen);
@@ -36,14 +38,11 @@ bool parsePasvReply(const std::string& replyLine, sockaddr_in& outAddr) {
 }
 
 bool connectToPassiveDataPort(const sockaddr_in& serverAddr, SOCKET& outDataSock) {
+    (void)serverAddr;
     outDataSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (outDataSock == INVALID_SOCKET) return false;
 
-    if (connect(outDataSock, reinterpret_cast<const sockaddr*>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR) {
-        closesocket(outDataSock);
-        outDataSock = INVALID_SOCKET;
-        return false;
-    }
-
     return true;
+}
+
 }

@@ -1,18 +1,23 @@
 #pragma once
 
-#include <filesystem>
-#include "../rdt/RdtHeader.h"
-#include "../common/TransferMode.h"
+#include "RdtHeader.h"
+#include "TransferMode.h"
 
-namespace fs = std::filesystem;
+#include <filesystem>
+
+namespace hybridftp::client {
 
 class DataChannelSession {
 public:
-    DataChannelSession(IRdtTransport& transport);
+    explicit DataChannelSession(IRdtTransport& transport);
 
-    bool sendFile(const fs::path& filePath, TransferMode mode = TransferMode::Binary);
-    bool receiveFile(const fs::path& destPath, TransferMode mode = TransferMode::Binary);
+    bool sendFile(const std::filesystem::path& filePath,
+                  TransferMode mode = TransferMode::Binary);
+    bool receiveFile(const std::filesystem::path& destination,
+                     TransferMode mode = TransferMode::Binary);
 
 private:
     IRdtTransport& transport;
 };
+
+}
