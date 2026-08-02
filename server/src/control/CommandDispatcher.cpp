@@ -147,13 +147,26 @@ namespace CommandDispatcher{
 
     std::map<std::string, std::function<void(ClientSession&, const std::vector<std::string>&)>> commandMap = {
         { "USER", [](ClientSession& s, const std::vector<std::string>& args) {
-            s.username = args.empty() ? "" : args[0];
-            Session::replyWithCode(s.socket, ReplyCode::AuthNeedPass, "Username OK, need password.");
+            std::string user = args.empty() ? "" : args[0];
+            auto it = Users::database.find(user);
+            if (it != Users::database.end()) {
+                s.username = user;
+                Session::replyWithCode(s.socket, ReplyCode::AuthNeedPass, "Username OK, need password.");
+            }
+            else {
+                Session::replyWithCode(s.socket, ReplyCode::NotLoggedIn, "Not logged in, username incorrect.");
+            }
+            
         }},
 
-        { "PASS", [](ClientSession& s, const std::vector<std::string>&) {
-            s.authenticated = true;   // Basic Level
-            Session::replyWithCode(s.socket, ReplyCode::LoggedIn, "User logged in.");
+        { "PASS", [](ClientSession& s, const std::vector<std::string>& args) {
+            if (s.username.empty()) return Session::replyWithCode(s.socket, ReplyCode::BadSequence, "Log in with USER first.");
+            std::string pw = args.empty() ? "" : args[0];
+            if (pw == Users::database.find(s.username)->second) {
+                s.authenticated = true;   // Basic Level
+                Session::replyWithCode(s.socket, ReplyCode::LoggedIn, "User logged in.");
+            }
+            else Session::replyWithCode(s.socket, ReplyCode::NotLoggedIn, "Not logged in, password incorrect.");
         }},
 
         { "QUIT", [](ClientSession& s, const std::vector<std::string>&) {
@@ -448,6 +461,10 @@ namespace CommandDispatcher{
     void executeCommand(ClientSession& s, const ParsedCommand cmd){
         auto it = commandMap.find(cmd.type);
         if (it != commandMap.end()) {
+            if (!s.authenticated && cmd.type != "USER" && cmd.type != "PASS" && 
+                cmd.type != "HELP" && cmd.type != "NOOP" && cmd.type != "QUIT") {
+                return Session::replyWithCode(s.socket, ReplyCode::NotLoggedIn, "Please log in using USER and PASS.");
+            }
             it->second(s, cmd.args);
         }
         else {

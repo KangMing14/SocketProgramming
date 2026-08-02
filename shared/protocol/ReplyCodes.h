@@ -22,6 +22,8 @@ namespace ReplyCode {
     constexpr int TransferAborted = 426;
 
     constexpr int SyntaxError = 500;
+    constexpr int BadSequence = 503;
+    constexpr int NotLoggedIn = 530;
     constexpr int ActionNotTaken = 550;
     constexpr int FilenameNotAllowed = 553;
 }
