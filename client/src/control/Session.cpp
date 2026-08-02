@@ -376,10 +376,3 @@ void runClientSession(SOCKET serverSocket) {
 }
 
 }
-[3] == '-');
-                    else replyReceived = true; 
-                }
-            }
-        }
-    }
-}
