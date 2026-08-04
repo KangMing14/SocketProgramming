@@ -1,5 +1,7 @@
 #include "Session.h"
 #include "../common/ReplyCodes.h"
+#include "../common/Logger.h"
+#include "../common/ClientRegistry.h"
 #include "CommandParser.h"
 #include "CommandDispatcher.h"
 #include "Globals.h"
@@ -69,6 +71,28 @@ namespace Session {
         getpeername(clientSock,
                     reinterpret_cast<sockaddr*>(&session.controlPeerAddr),
                     &peerLength);
+
+        // Register this session in the shared connected-clients table
+        char peerIp[INET_ADDRSTRLEN] = {};
+        inet_ntop(AF_INET, &session.controlPeerAddr.sin_addr, peerIp, sizeof(peerIp));
+        std::string peerAddress = std::string(peerIp) + ":" +
+            std::to_string(ntohs(session.controlPeerAddr.sin_port));
+        ClientRegistry::addClient(clientSock, peerAddress);
+
+        // Log each client that connects and disconnects
+        Logger::log("Client connected: " + peerAddress + ". There are now " + 
+            std::to_string(ClientRegistry::count()) + " connected client(s).");
+
+        // Guarantees removal on exit without calling removeClient() at each return site
+        struct RegistryGuard {
+            SOCKET socket;
+            std::string address;
+            ~RegistryGuard() { 
+                ClientRegistry::removeClient(socket); 
+                Logger::log("Client disconnected: " + address + ". There are now " + 
+                    std::to_string(ClientRegistry::count()) + " connected client(s).");
+            }
+        } registryGuard{clientSock, peerAddress};
 
         replyWithCode(clientSock, ReplyCode::ServiceReady, "Service ready.");
 

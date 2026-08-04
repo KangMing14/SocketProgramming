@@ -151,6 +151,8 @@ namespace CommandDispatcher{
             auto it = Users::database.find(user);
             if (it != Users::database.end()) {
                 s.username = user;
+                ClientRegistry::setUsername(s.socket, s.username);
+                Logger::log("Client " + ClientRegistry::clients[s.socket].address + " identified as \"" + s.username + "\".");
                 Session::replyWithCode(s.socket, ReplyCode::AuthNeedPass, "Username OK, need password.");
             }
             else {
@@ -230,7 +232,8 @@ namespace CommandDispatcher{
 
         { "STAT", [](ClientSession& s, const std::vector<std::string>& args) {
             if (args.empty()) {
-                Session::replyWithCode(s.socket, ReplyCode::SystemStatus, "Server status: OK.");  // no-path case
+                std::string response = "Server status: OK." + std::to_string(ClientRegistry::count()) + " client(s) connected.";
+                Session::replyWithCode(s.socket, ReplyCode::SystemStatus, response);  // no-path case
                 return;
             }
             DirectoryService::PathMetadata meta;
