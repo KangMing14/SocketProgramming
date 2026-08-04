@@ -1,5 +1,7 @@
 #pragma once
 #include "../common/Users.h"
+#include "../common/ClientRegistry.h"
+#include "../common/Logger.h"
 #include "../common/ReplyCodes.h"
 #include "CommandParser.h"
 #include "Session.h"
