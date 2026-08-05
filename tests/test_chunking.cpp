@@ -109,74 +109,82 @@ void test_writer_in_order_chunks() {
     std::vector<char> chunk;
     uint32_t seq = 0, count = 0;
     while (reader.nextChunk(chunk)) {
-        writer.addChunk(seq, chunk);
+        assert(writer.appendChunk(seq, chunk));
         seq++; count++;
     }
 
-    assert(writer.finalize(count) == true);
+    assert(writer.commit());
     assert(filesAreIdentical("test_writer_source.bin", dst));
     std::cout << "[PASS] test_writer_in_order_chunks\n";
 }
 
-// Chunks arrive in the incorrect order - reversed
-void test_writer_out_of_order_chunks() {
+// RDT must reorder chunks before handing them to the streaming writer.
+void test_writer_rejects_out_of_order_chunks() {
     fs::path dst = "test_writer_outoforder.bin";
-    createTestFile("test_writer_source2.bin", 3600);
-
-    ChunkedFileReader reader("test_writer_source2.bin");
-    std::vector<std::vector<char>> allChunks;
-    std::vector<char> chunk;
-    while (reader.nextChunk(chunk)) allChunks.push_back(chunk);
+    createTestFile(dst, 17);
+    const std::vector<char> chunk{'x'};
 
     ChunkedFileWriter writer(dst);
-    // Feed chunks in reverse order
-    for (int i = static_cast<int>(allChunks.size()) - 1; i >= 0; i--) {
-        writer.addChunk(static_cast<uint32_t>(i), allChunks[i]);
-    }
-
-    assert(writer.finalize(static_cast<uint32_t>(allChunks.size())) == true);
-    assert(filesAreIdentical("test_writer_source2.bin", dst));
-    std::cout << "[PASS] test_writer_out_of_order_chunks\n";
+    assert(!writer.appendChunk(1, chunk));
+    writer.abort();
+    assert(fs::file_size(dst) == 17);
+    std::cout << "[PASS] test_writer_rejects_out_of_order_chunks\n";
 }
 
-// Send chunk 0 twice
-void test_writer_duplicate_chunks() {
+void test_writer_rejects_duplicate_chunks() {
     fs::path dst = "test_writer_dup.bin";
-    createTestFile("test_writer_source3.bin", 1500);
-
-    ChunkedFileReader reader("test_writer_source3.bin");
+    const std::vector<char> chunk{'a', 'b', 'c'};
     ChunkedFileWriter writer(dst);
-    std::vector<char> chunk;
-    uint32_t seq = 0, count = 0;
-    std::vector<char> firstChunkCopy;
-
-    while (reader.nextChunk(chunk)) {
-        writer.addChunk(seq, chunk);
-        if (seq == 0) firstChunkCopy = chunk;
-        seq++; count++;
-    }
-    writer.addChunk(0, firstChunkCopy); // re-send seqNum 0 again
-
-    assert(writer.finalize(count) == true);
-    assert(filesAreIdentical("test_writer_source3.bin", dst));
-    std::cout << "[PASS] test_writer_duplicate_chunks\n";
+    assert(writer.appendChunk(0, chunk));
+    assert(!writer.appendChunk(0, chunk));
+    writer.abort();
+    assert(!fs::exists(dst));
+    std::cout << "[PASS] test_writer_rejects_duplicate_chunks\n";
 }
 
-// Withhold one chunk
-void test_writer_missing_chunk_fails() {
+void test_writer_abort_preserves_existing_destination() {
     fs::path dst = "test_writer_missing.bin";
-    createTestFile("test_writer_source4.bin", 3000);
+    fs::path expected = "test_writer_existing_expected.bin";
+    createTestFile(dst, 333);
+    fs::copy_file(dst, expected, fs::copy_options::overwrite_existing);
+    ChunkedFileWriter writer(dst);
+    assert(writer.appendChunk(0, std::vector<char>(1024, 'z')));
+    writer.abort();
+    assert(filesAreIdentical(dst, expected));
+    std::cout << "[PASS] test_writer_abort_preserves_existing_destination\n";
+}
 
-    ChunkedFileReader reader("test_writer_source4.bin");
+void test_writer_replaces_existing_destination() {
+    fs::path source = "test_writer_source4.bin";
+    fs::path dst = "test_writer_replace.bin";
+    createTestFile(source, 4097);
+    createTestFile(dst, 19);
+
+    ChunkedFileReader reader(source);
     ChunkedFileWriter writer(dst);
     std::vector<char> chunk;
-    uint32_t seq = 0, count = 0;
+    uint32_t sequence = 0;
     while (reader.nextChunk(chunk)) {
-        if (seq != 1) writer.addChunk(seq, chunk); // skip seqNum 1
-        seq++; count++;
+        assert(writer.appendChunk(sequence++, chunk));
     }
+    assert(writer.commit());
+    assert(filesAreIdentical(source, dst));
+    std::cout << "[PASS] test_writer_replaces_existing_destination\n";
+}
 
-    std::cout << "[PASS] test_writer_missing_chunk_fails\n";
+void test_writer_streams_large_file() {
+    fs::path dst = "test_writer_large.bin";
+    ChunkedFileWriter writer(dst);
+    assert(writer.isValid());
+    const std::vector<char> chunk(ChunkedFileReader::CHUNK_SIZE, 'L');
+    constexpr uint32_t chunkCount = 16 * 1024;
+    for (uint32_t sequence = 0; sequence < chunkCount; ++sequence) {
+        assert(writer.appendChunk(sequence, chunk));
+    }
+    assert(writer.commit());
+    assert(fs::file_size(dst) ==
+           static_cast<uintmax_t>(chunk.size()) * chunkCount);
+    std::cout << "[PASS] test_writer_streams_large_file\n";
 }
 
 
@@ -190,9 +198,11 @@ int main() {
 
     std::cout << "\nChunkedFileWriter tests:\n";
     test_writer_in_order_chunks();
-    test_writer_out_of_order_chunks();
-    test_writer_duplicate_chunks();
-    test_writer_missing_chunk_fails();
+    test_writer_rejects_out_of_order_chunks();
+    test_writer_rejects_duplicate_chunks();
+    test_writer_abort_preserves_existing_destination();
+    test_writer_replaces_existing_destination();
+    test_writer_streams_large_file();
 
     std::cout << "\n---All Chunking tests passed---\n";
 
@@ -203,6 +213,9 @@ int main() {
                               "test_totalsize.bin", "test_totalsize_copy.bin",
                               "test_writer_inorder.bin", "test_writer_outoforder.bin",
                               "test_writer_dup.bin", "test_writer_missing.bin",
+                              "test_writer_existing_expected.bin",
+                              "test_writer_replace.bin",
+                              "test_writer_large.bin",
                               "test_writer_source.bin", "test_writer_source2.bin",
                               "test_writer_source3.bin", "test_writer_source4.bin" }) {
         std::error_code ec;

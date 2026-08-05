@@ -134,6 +134,13 @@ int main() {
         require(replies.readCode(clientControl) == ReplyCode::ServiceReady,
                 "Expected 220 greeting");
 
+        sendCommand(clientControl, "USER user");
+        require(replies.readCode(clientControl) == ReplyCode::AuthNeedPass,
+                "Expected 331 after USER");
+        sendCommand(clientControl, "PASS password");
+        require(replies.readCode(clientControl) == ReplyCode::LoggedIn,
+                "Expected 230 after PASS");
+
         SOCKET rejectedSocket = INVALID_SOCKET;
         unsigned short rejectedPort = 0;
         require(hybridftp::client::openActiveListenPort(

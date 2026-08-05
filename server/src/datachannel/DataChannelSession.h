@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <string>
 #include <vector>
 #include <cstdint>
 #include <winsock2.h>
@@ -9,11 +10,19 @@
 
 namespace fs = std::filesystem;
 
+struct SendResult {
+    bool success = false;
+    std::string sha256;
+
+    operator bool() const noexcept { return success; }
+};
+
 class DataChannelSession {
 public:
     DataChannelSession(IRdtTransport& transport);
 
-    bool sendFile(const fs::path& filePath, TransferMode mode = TransferMode::Binary);
+    SendResult sendFile(const fs::path& filePath,
+                        TransferMode mode = TransferMode::Binary);
     bool receiveFile(const fs::path& destPath, TransferMode mode = TransferMode::Binary);
 
 private:

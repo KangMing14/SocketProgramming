@@ -362,17 +362,19 @@ namespace CommandDispatcher{
                                        "Data handshake failed.");
                 return;
             }
-            bool ok = channel.sendFile(resolved, s.transferMode);
-            if (ok && s.transferMode == TransferMode::Binary) {
-                std::string hash = Sha256Hasher::hashFile(resolved);
-                std::string msg = hash.empty()
+            const SendResult result = channel.sendFile(resolved, s.transferMode);
+            if (result.success && s.transferMode == TransferMode::Binary) {
+                std::string msg = result.sha256.empty()
                     ? "Transfer complete. Hash unavailable."
-                    : "Transfer complete. SHA256=" + hash;
+                    : "Transfer complete. SHA256=" + result.sha256;
                 Session::replyWithCode(s.socket, ReplyCode::TransferComplete, msg);
             }
             else {
-                Session::replyWithCode(s.socket, ok ? ReplyCode::TransferComplete : ReplyCode::TransferAborted,
-                    ok ? "Transfer complete." : "Transfer failed.");
+                Session::replyWithCode(
+                    s.socket,
+                    result.success ? ReplyCode::TransferComplete
+                                   : ReplyCode::TransferAborted,
+                    result.success ? "Transfer complete." : "Transfer failed.");
             }
         } },
 

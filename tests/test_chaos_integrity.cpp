@@ -151,10 +151,10 @@ bool receiveKnownNumberOfChunks(
             return false;
         }
 
-        writer.addChunk(sequenceNumber, data);
+        if (!writer.appendChunk(sequenceNumber, data)) return false;
     }
 
-    return writer.finalize(expectedChunkCount);
+    return writer.commit();
 }
 
 bool runOneChaosTransfer(
