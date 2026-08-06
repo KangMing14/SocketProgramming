@@ -13,4 +13,5 @@
 
 namespace CommandDispatcher{
     void executeCommand(ClientSession&, const ParsedCommand);
+    void shutdownSession(ClientSession&);
 }

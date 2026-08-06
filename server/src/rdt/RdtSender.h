@@ -34,6 +34,7 @@ private:
   // Test seams
   std::function<int(SOCKET, const char*, int, int, const sockaddr*, int)> injectedSendTo;
   std::function<void()> injectedPreSendDelay;
+  std::function<bool()> abortPredicate;
 
   // Helper to physically send the packet
   bool sendRawPacket(const RdtPacket &packet, std::chrono::steady_clock::time_point &outSendTime);
@@ -56,6 +57,7 @@ private:
 
   // Helper to poll ACKs non-blockingly (or blockingly) and retransmit
   bool pollAcksAndRetransmit(bool blocking);
+  bool isAbortRequested() const;
 
 public:
   // Testability accessors
@@ -84,4 +86,5 @@ public:
   bool waitForClientReady();
   bool flush() override;
   bool isValid() const noexcept { return udpSocket != INVALID_SOCKET; }
+  void setAbortPredicate(std::function<bool()> predicate);
 };

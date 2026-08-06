@@ -13,6 +13,8 @@
 #include <string>
 #include <thread>
 #include <filesystem>
+#include <atomic>
+#include <mutex>
 #include "TransferMode.h"
 
 enum class DataChannelMode { None, Passive, Active };
@@ -33,6 +35,14 @@ struct ClientSession {
     // Populated by RNFR, consumed by RNTO
     std::filesystem::path pendingRenameSource;
     bool hasPendingRename = false;
+
+    // The worker owns a consumed data socket while the control thread remains
+    // responsive to ABOR.
+    std::atomic_bool transferActive{false};
+    std::atomic_bool abortRequested{false};
+    std::thread transferWorker;
+    std::mutex replyMutex;
+    std::string pendingUniqueFilename;
 };
 
 namespace Session {

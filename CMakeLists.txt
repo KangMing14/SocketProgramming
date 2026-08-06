@@ -113,6 +113,10 @@ add_executable(test_active_stor_control tests/test_active_stor_control.cpp)
 target_link_libraries(test_active_stor_control PRIVATE ftp_server_core ftp_client_core)
 add_test(NAME test_active_stor_control COMMAND test_active_stor_control)
 
+add_executable(test_remaining_commands tests/test_remaining_commands.cpp)
+target_link_libraries(test_remaining_commands PRIVATE ftp_server_core ftp_client_core)
+add_test(NAME test_remaining_commands COMMAND test_remaining_commands)
+
 add_executable(test_temp_transfer_client tests/test_temp_transfer_client.cpp)
 target_link_libraries(test_temp_transfer_client PRIVATE ftp_client_core)
 add_test(NAME test_temp_transfer_client COMMAND test_temp_transfer_client)
@@ -125,6 +129,7 @@ else()
         test_rdt_integration test_rdt_congestion
         test_transfer_matrix
         test_active_stor_control
+        test_remaining_commands
         PROPERTIES LABELS "deterministic"
     )
 endif()

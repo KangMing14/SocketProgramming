@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <chrono>
 #include <thread>
+#include <utility>
 #include <algorithm>
 #include <cmath>
 
@@ -90,6 +91,14 @@ RdtSender::~RdtSender()
 
 double RdtSender::getCongestionWindow() const noexcept { return cwnd; }
 int RdtSender::getTimeoutMs() const noexcept { return timeoutMs; }
+
+bool RdtSender::isAbortRequested() const {
+  return abortPredicate && abortPredicate();
+}
+
+void RdtSender::setAbortPredicate(std::function<bool()> predicate) {
+  abortPredicate = std::move(predicate);
+}
 double RdtSender::getEstimatedRttMs() const noexcept { return estimatedRttMs; }
 double RdtSender::getDevRttMs() const noexcept { return devRttMs; }
 size_t RdtSender::getCleanAckCount() const noexcept { return cleanAcks; }
@@ -218,6 +227,7 @@ bool RdtSender::sendRawPacket(const RdtPacket &packet, std::chrono::steady_clock
 // PRIVATE HELPER: Polls for ACKs (blocking or non-blocking) and handles retransmissions
 bool RdtSender::pollAcksAndRetransmit(bool blocking)
 {
+  if (isAbortRequested()) return false;
   fd_set readfds;
   FD_ZERO(&readfds);
   FD_SET(udpSocket, &readfds);
@@ -236,6 +246,7 @@ bool RdtSender::pollAcksAndRetransmit(bool blocking)
 
   while (true)
   {
+    if (isAbortRequested()) return false;
     FD_ZERO(&readfds);
     FD_SET(udpSocket, &readfds);
     // Use select to check for incoming ACKs
@@ -333,6 +344,7 @@ bool RdtSender::pollAcksAndRetransmit(bool blocking)
 
   for (auto &pkt : window)
   {
+    if (isAbortRequested()) return false;
     if (!pkt.acked)
     {
       auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - pkt.sent_time).count();
@@ -398,6 +410,7 @@ bool RdtSender::pollAcksAndRetransmit(bool blocking)
 bool RdtSender::sendChunk(uint32_t seqNum, const char *data, size_t len,
                           bool isFinal)
 {
+  if (isAbortRequested()) return false;
   if (len > MAX_PAYLOAD || (len > 0 && data == nullptr))
   {
     std::cerr << "[Sender] REJECTED: chunk length " << len
@@ -408,6 +421,7 @@ bool RdtSender::sendChunk(uint32_t seqNum, const char *data, size_t len,
   // 1. If window is full, block until space frees up
   while (window.size() >= effectiveWindowSize())
   {
+    if (isAbortRequested()) return false;
     if (!pollAcksAndRetransmit(true)) return false;
   }
 
@@ -460,6 +474,7 @@ bool RdtSender::flush()
 {
   while (!window.empty())
   {
+    if (isAbortRequested()) return false;
     if (!pollAcksAndRetransmit(true)) return false;
   }
   return true;
@@ -473,6 +488,7 @@ bool RdtSender::receiveNext(uint32_t&, std::vector<char>&, bool&)
 
 bool RdtSender::waitForClientReady()
 {
+  if (isAbortRequested()) return false;
   std::cout << "[Sender] Waiting for client READY (SYN) packet on PASV port..." << std::endl;
   char recvBuf[HEADER_SIZE + MAX_PAYLOAD];
   sockaddr_in clientAddr{};
@@ -485,12 +501,14 @@ bool RdtSender::waitForClientReady()
 
   for (int attempt = 0; attempt < HANDSHAKE_MAX_RETRIES; ++attempt)
   {
+    if (isAbortRequested()) return false;
     int n = recvfrom(udpSocket, recvBuf, sizeof(recvBuf), 0,
                      (sockaddr *)&clientAddr, &clientLen);
 
     if (n == SOCKET_ERROR)
     {
       int err = WSAGetLastError();
+      if (isAbortRequested()) return false;
       if (err == WSAETIMEDOUT)
       {
         continue;

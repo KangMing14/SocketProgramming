@@ -4,6 +4,7 @@
 #include "TransferMode.h"
 
 #include <filesystem>
+#include <functional>
 #include <string>
 
 namespace hybridftp::client {
@@ -17,7 +18,10 @@ struct SendResult {
 
 class DataChannelSession {
 public:
-    explicit DataChannelSession(IRdtTransport& transport);
+    using AbortPredicate = std::function<bool()>;
+
+    explicit DataChannelSession(IRdtTransport& transport,
+                                AbortPredicate abortRequested = {});
 
     SendResult sendFile(const std::filesystem::path& filePath,
                         TransferMode mode = TransferMode::Binary);
@@ -26,6 +30,9 @@ public:
 
 private:
     IRdtTransport& transport;
+    AbortPredicate abortRequested;
+
+    bool isAborted() const;
 };
 
 }

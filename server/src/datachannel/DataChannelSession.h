@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <functional>
 #include <winsock2.h>
 #include "../rdt/RdtHeader.h"
 #include "../common/TransferMode.h"
@@ -19,7 +20,10 @@ struct SendResult {
 
 class DataChannelSession {
 public:
-    DataChannelSession(IRdtTransport& transport);
+    using AbortPredicate = std::function<bool()>;
+
+    explicit DataChannelSession(IRdtTransport& transport,
+                                AbortPredicate abortRequested = {});
 
     SendResult sendFile(const fs::path& filePath,
                         TransferMode mode = TransferMode::Binary);
@@ -27,4 +31,7 @@ public:
 
 private:
     IRdtTransport& transport;
+    AbortPredicate abortRequested;
+
+    bool isAborted() const;
 };

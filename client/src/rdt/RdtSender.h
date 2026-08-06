@@ -5,6 +5,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <stdio.h>
+#include <functional>
 
 namespace hybridftp::client {
 
@@ -14,12 +15,14 @@ private:
   SOCKET udpSocket;
   sockaddr_in destAddr;
   int timeoutMs;
+  std::function<bool()> abortPredicate;
 
   // Helper to physically send the packet
   void sendRawPacket(const RdtPacket &packet);
 
   // Helper to wait for the ACK
   bool waitForAck(uint32_t expected_ack_num);
+  bool isAbortRequested() const;
 
 public:
   // Constructor: creates its own UDP socket and sets the destination
@@ -45,6 +48,7 @@ public:
   bool flush() override { return true; }
   bool waitForServerReady(const in_addr& expectedServerIp);
   bool isValid() const noexcept { return udpSocket != INVALID_SOCKET; }
+  void setAbortPredicate(std::function<bool()> predicate);
 };
 
 }

@@ -4,6 +4,7 @@
 #include <winsock2.h>
 #include <string>
 #include <map>
+#include <functional>
 
 namespace hybridftp::client {
 
@@ -18,9 +19,12 @@ private:
     in_addr expectedPeerIp{};
     std::map<uint32_t, std::pair<std::vector<char>, bool>> outOfOrderBuffer;
     uint32_t expectedSequence = 0;
+    std::function<bool()> abortPredicate;
 
     // Helper to send an ACK back to whatever address just sent us data
     void sendAck(uint32_t ack_num, sockaddr_in &clientAddr);
+    bool isAbortRequested() const;
+    void applyDataTimeout();
 
 public:
     // Constructor binds the socket to a specific port to listen
@@ -43,6 +47,7 @@ public:
     bool signalClientReady(const sockaddr_in& serverDataAddress);
     void expectPeerIp(const in_addr& address);
     bool isValid() const noexcept { return udpSocket != INVALID_SOCKET; }
+    void setAbortPredicate(std::function<bool()> predicate);
 };
 
 }

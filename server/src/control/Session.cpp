@@ -120,10 +120,7 @@ namespace Session {
 
                 // Check if client disconnected from server
                 if (session.socket == INVALID_SOCKET) {
-                    if (session.pendingDataSocket != INVALID_SOCKET) {
-                        closesocket(session.pendingDataSocket);
-                        session.pendingDataSocket = INVALID_SOCKET;
-                    }
+                    CommandDispatcher::shutdownSession(session);
                     return;
                 }
 
@@ -132,10 +129,7 @@ namespace Session {
             }
         }
 
-        if (session.pendingDataSocket != INVALID_SOCKET) {
-            closesocket(session.pendingDataSocket);
-            session.pendingDataSocket = INVALID_SOCKET;
-        }
+        CommandDispatcher::shutdownSession(session);
         closesocket(clientSock);
         printf("Client disconnected.\n");
     }

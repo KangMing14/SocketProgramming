@@ -24,7 +24,11 @@ public:
     Result changeToParent(fs::path& currentDir) const;                                                // DCUP
     Result makeDir(const fs::path& currentDir, const std::string& name) const;                        // MKD
     Result removeDir(const fs::path& currentDir, const std::string& name) const;                      // RMD
-    bool listDir(const fs::path& currentDir, std::vector<DirEntryInfo>& outEntries) const;            // LIST/NLST
+    bool listDir(const fs::path& currentDir, const std::string& target,
+        std::vector<DirEntryInfo>& outEntries) const;                                                // LIST/NLST
+    bool listDir(const fs::path& currentDir, std::vector<DirEntryInfo>& outEntries) const {
+        return listDir(currentDir, "", outEntries);
+    }
 
     struct PathMetadata { bool exists; bool isDirectory; uintmax_t sizeBytes; fs::file_time_type lastModified; };
     bool getMetadata(const fs::path& currentDir, const std::string& target, PathMetadata& out) const; // STAT w/path, SIZE, MTDM

@@ -9,8 +9,15 @@
 #include "RdtReceiver.h"
 #include "RdtSender.h"
 #include "Sha256Hasher.h"
+#include <atomic>
+#include <fstream>
+#include <iomanip>
 #include <memory>
+#include <sstream>
+#include <system_error>
+#include <thread>
 #include <utility>
+#include <windows.h>
 
 namespace {
 void clearDataState(ClientSession& session) {
@@ -26,6 +33,294 @@ bool portMatchesControlPeer(const ClientSession& session,
                             const sockaddr_in& advertised) {
     return advertised.sin_addr.s_addr == session.controlPeerAddr.sin_addr.s_addr &&
            advertised.sin_port != 0;
+}
+
+void sessionReply(ClientSession& session, int code, const std::string& message) {
+    std::lock_guard<std::mutex> lock(session.replyMutex);
+    if (session.socket != INVALID_SOCKET) {
+        Session::replyWithCode(session.socket, code, message);
+    }
+}
+
+void joinCompletedTransfer(ClientSession& session) {
+    if (!session.transferActive.load() && session.transferWorker.joinable()) {
+        session.transferWorker.join();
+    }
+}
+
+bool createSiblingTemporaryPath(const std::filesystem::path& destination,
+                                const wchar_t* prefix,
+                                std::filesystem::path& outPath) {
+    const std::filesystem::path parent = destination.parent_path();
+    if (parent.empty()) return false;
+    wchar_t buffer[MAX_PATH]{};
+    if (GetTempFileNameW(parent.c_str(), prefix, 0, buffer) == 0) return false;
+    outPath = buffer;
+    return true;
+}
+
+bool appendAtomically(const std::filesystem::path& destination,
+                      const std::filesystem::path& incoming) {
+    std::filesystem::path combined;
+    if (!createSiblingTemporaryPath(destination, L"hfa", combined)) return false;
+
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() {
+            if (!path.empty()) {
+                std::error_code ignored;
+                std::filesystem::remove(path, ignored);
+            }
+        }
+    } cleanup{combined};
+
+    std::ofstream output(combined, std::ios::binary | std::ios::trunc);
+    if (!output) return false;
+
+    std::error_code error;
+    if (std::filesystem::exists(destination, error)) {
+        if (error || !std::filesystem::is_regular_file(destination, error)) {
+            return false;
+        }
+        std::ifstream existing(destination, std::ios::binary);
+        if (!existing) return false;
+        output << existing.rdbuf();
+        if (existing.bad() || !output.good()) return false;
+    } else if (error) {
+        return false;
+    }
+
+    std::ifstream addition(incoming, std::ios::binary);
+    if (!addition) return false;
+    output << addition.rdbuf();
+    if (addition.bad() || !output.good()) return false;
+    output.flush();
+    if (!output.good()) return false;
+    output.close();
+    if (output.fail()) return false;
+
+    if (!MoveFileExW(combined.c_str(), destination.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        return false;
+    }
+    cleanup.path.clear();
+    return true;
+}
+
+bool reserveUniqueUpload(const std::filesystem::path& currentDir,
+                         std::filesystem::path& resolved,
+                         std::string& filename) {
+    static std::atomic_uint64_t nextId{1};
+    for (std::size_t attempt = 0; attempt < 10000; ++attempt) {
+        const std::uint64_t id = nextId.fetch_add(1);
+        std::ostringstream name;
+        name << "upload_" << std::setw(4) << std::setfill('0') << id << ".bin";
+        std::filesystem::path candidate;
+        if (!g_pathResolver.resolve(currentDir, name.str(), candidate)) {
+            return false;
+        }
+        HANDLE file = CreateFileW(candidate.c_str(), GENERIC_WRITE, 0, nullptr,
+                                  CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE) {
+            CloseHandle(file);
+            resolved = std::move(candidate);
+            filename = name.str();
+            return true;
+        }
+        if (GetLastError() != ERROR_FILE_EXISTS &&
+            GetLastError() != ERROR_ALREADY_EXISTS) {
+            return false;
+        }
+    }
+    return false;
+}
+
+enum class UploadKind { Store, Unique, Append };
+
+std::string transferCompleteMessage(const std::string& hash,
+                                    const std::string& uniqueFilename = {}) {
+    std::string message = "Transfer complete.";
+    if (!uniqueFilename.empty()) message += " Filename=" + uniqueFilename;
+    if (!hash.empty()) message += " SHA256=" + hash;
+    return message;
+}
+
+void finishTransfer(ClientSession& session, bool success,
+                    const std::string& successMessage) {
+    std::lock_guard<std::mutex> lock(session.replyMutex);
+    const bool aborted = session.abortRequested.load();
+    if (!aborted && session.socket != INVALID_SOCKET) {
+        Session::replyWithCode(
+            session.socket,
+            success ? ReplyCode::TransferComplete : ReplyCode::TransferAborted,
+            success ? successMessage : "Transfer failed.");
+    }
+    session.transferActive.store(false);
+}
+
+void startDownloadTransfer(ClientSession& session,
+                           const std::filesystem::path& source) {
+    if (session.dataChannelMode == DataChannelMode::None) {
+        sessionReply(session, ReplyCode::CantOpenDataConnection,
+                     "Use PORT or PASV before RETR.");
+        return;
+    }
+
+    joinCompletedTransfer(session);
+    const bool passive = session.dataChannelMode == DataChannelMode::Passive;
+    std::unique_ptr<RdtSender> transport;
+    if (passive) {
+        const SOCKET dataSocket = std::exchange(
+            session.pendingDataSocket, INVALID_SOCKET);
+        transport = std::make_unique<RdtSender>(dataSocket);
+    } else {
+        char peerIp[INET_ADDRSTRLEN]{};
+        inet_ntop(AF_INET, &session.pendingPeerAddr.sin_addr,
+                  peerIp, sizeof(peerIp));
+        transport = std::make_unique<RdtSender>(
+            peerIp, ntohs(session.pendingPeerAddr.sin_port));
+    }
+    session.dataChannelMode = DataChannelMode::None;
+    session.pendingPeerAddr = {};
+    if (!transport->isValid()) {
+        sessionReply(session, ReplyCode::CantOpenDataConnection,
+                     "Could not open data connection.");
+        return;
+    }
+
+    session.abortRequested.store(false);
+    session.transferActive.store(true);
+    const TransferMode transferMode = session.transferMode;
+    sessionReply(session, ReplyCode::FileStatusOkay, "Opening data connection.");
+
+    try {
+        session.transferWorker = std::thread(
+            [&session, source, transferMode, passive,
+             transport = std::move(transport)]() mutable {
+                const auto aborted = [&session] {
+                    return session.abortRequested.load();
+                };
+                transport->setAbortPredicate(aborted);
+                bool ready = !passive || transport->waitForClientReady();
+                DataChannelSession channel(*transport, aborted);
+                SendResult result;
+                if (ready && !aborted()) {
+                    result = channel.sendFile(source, transferMode);
+                }
+                finishTransfer(
+                    session, result.success,
+                    transferCompleteMessage(
+                        transferMode == TransferMode::Binary
+                            ? result.sha256 : std::string{}));
+            });
+    } catch (const std::system_error&) {
+        session.transferActive.store(false);
+        sessionReply(session, ReplyCode::CantOpenDataConnection,
+                     "Could not start transfer worker.");
+    }
+}
+
+void startUploadTransfer(ClientSession& session,
+                         const std::filesystem::path& destination,
+                         UploadKind kind,
+                         const std::string& uniqueFilename = {}) {
+    if (session.dataChannelMode == DataChannelMode::None) {
+        sessionReply(session, ReplyCode::CantOpenDataConnection,
+                     "Use PORT or PASV before upload.");
+        if (kind == UploadKind::Unique) {
+            std::error_code ignored;
+            std::filesystem::remove(destination, ignored);
+        }
+        return;
+    }
+
+    std::filesystem::path stagingPath;
+    if (kind == UploadKind::Append &&
+        !createSiblingTemporaryPath(destination, L"hfu", stagingPath)) {
+        clearDataState(session);
+        sessionReply(session, ReplyCode::ActionNotTaken,
+                     "Could not create append staging file.");
+        return;
+    }
+
+    joinCompletedTransfer(session);
+    const bool passive = session.dataChannelMode == DataChannelMode::Passive;
+    std::unique_ptr<RdtReceiver> transport;
+    if (passive) {
+        const SOCKET dataSocket = std::exchange(
+            session.pendingDataSocket, INVALID_SOCKET);
+        transport = std::make_unique<RdtReceiver>(dataSocket);
+    } else {
+        transport = std::make_unique<RdtReceiver>(static_cast<uint16_t>(0));
+    }
+    const sockaddr_in activePeer = session.pendingPeerAddr;
+    session.dataChannelMode = DataChannelMode::None;
+    session.pendingPeerAddr = {};
+    if (!transport->isValid()) {
+        std::error_code ignored;
+        if (!stagingPath.empty()) std::filesystem::remove(stagingPath, ignored);
+        if (kind == UploadKind::Unique) {
+            std::filesystem::remove(destination, ignored);
+        }
+        sessionReply(session, ReplyCode::CantOpenDataConnection,
+                     "Could not open data connection.");
+        return;
+    }
+
+    session.abortRequested.store(false);
+    session.transferActive.store(true);
+    session.pendingUniqueFilename = uniqueFilename;
+    const TransferMode transferMode = session.transferMode;
+    sessionReply(session, ReplyCode::FileStatusOkay, "Opening data connection.");
+
+    try {
+        session.transferWorker = std::thread(
+            [&session, destination, stagingPath, transferMode, passive,
+             activePeer, kind, uniqueFilename,
+             transport = std::move(transport)]() mutable {
+                const auto aborted = [&session] {
+                    return session.abortRequested.load();
+                };
+                transport->setAbortPredicate(aborted);
+                bool ready = passive ||
+                    transport->initiateActiveHandshake(activePeer);
+                const std::filesystem::path receivePath =
+                    kind == UploadKind::Append ? stagingPath : destination;
+                DataChannelSession channel(*transport, aborted);
+                bool success = ready && !aborted() &&
+                    channel.receiveFile(receivePath, transferMode);
+                if (success && kind == UploadKind::Append && !aborted()) {
+                    success = appendAtomically(destination, stagingPath);
+                }
+
+                std::error_code ignored;
+                if (!stagingPath.empty()) {
+                    std::filesystem::remove(stagingPath, ignored);
+                }
+                if (!success && kind == UploadKind::Unique) {
+                    std::filesystem::remove(destination, ignored);
+                }
+
+                std::string hash;
+                if (success && transferMode == TransferMode::Binary) {
+                    hash = Sha256Hasher::hashFile(destination);
+                }
+                finishTransfer(
+                    session, success,
+                    transferCompleteMessage(hash, uniqueFilename));
+                session.pendingUniqueFilename.clear();
+            });
+    } catch (const std::system_error&) {
+        session.transferActive.store(false);
+        std::error_code ignored;
+        if (!stagingPath.empty()) std::filesystem::remove(stagingPath, ignored);
+        if (kind == UploadKind::Unique) {
+            std::filesystem::remove(destination, ignored);
+        }
+        session.pendingUniqueFilename.clear();
+        sessionReply(session, ReplyCode::CantOpenDataConnection,
+                     "Could not start transfer worker.");
+    }
 }
 }
 
@@ -91,9 +386,9 @@ namespace CommandDispatcher{
             "Syntax: TYPE {A | I}\n"
             "Set the data transfer type: A = ASCII (text), I = Image/Binary."
         },
-        { "MODE", 
+        { "MODE",
             "Syntax: MODE {S | B | C}\n"
-            "Set the transfer mode: S = Stream, B = Block, C = Compressed."
+            "Set the transfer mode. Stream (S) is supported; Block (B) and Compressed (C) return 504."
         },
         { "PORT", 
             "Syntax: PORT <h1,h2,h3,h4,p1,p2>\n"
@@ -207,9 +502,15 @@ namespace CommandDispatcher{
             Session::replyWithCode(s.socket, r.code, r.message);
         }},
 
-        { "LIST", [](ClientSession& s, const std::vector<std::string>&) {
+        { "LIST", [](ClientSession& s, const std::vector<std::string>& args) {
+            if (args.size() > 1) {
+                Session::replyWithCode(s.socket, ReplyCode::SyntaxError,
+                                       "Syntax: LIST [path]");
+                return;
+            }
             std::vector<DirEntryInfo> entries;
-            if (!g_dirService.listDir(s.currentDir, entries)) {
+            if (!g_dirService.listDir(
+                    s.currentDir, args.empty() ? "" : args[0], entries)) {
                 Session::replyWithCode(s.socket, ReplyCode::ActionNotTaken, "Could not list directory.");
                 return;
             }
@@ -219,9 +520,15 @@ namespace CommandDispatcher{
             Session::replyWithCode(s.socket, ReplyCode::ActionCompleted, body);
         }},
 
-        { "NLST", [](ClientSession& s, const std::vector<std::string>&) {
+        { "NLST", [](ClientSession& s, const std::vector<std::string>& args) {
+            if (args.size() > 1) {
+                Session::replyWithCode(s.socket, ReplyCode::SyntaxError,
+                                       "Syntax: NLST [path]");
+                return;
+            }
             std::vector<DirEntryInfo> entries;
-            if (!g_dirService.listDir(s.currentDir, entries)) {
+            if (!g_dirService.listDir(
+                    s.currentDir, args.empty() ? "" : args[0], entries)) {
                 Session::replyWithCode(s.socket, ReplyCode::ActionNotTaken, "Could not list directory.");
                 return;
             }
@@ -321,116 +628,83 @@ namespace CommandDispatcher{
         } },
 
         {"RETR", [](ClientSession& s, const std::vector<std::string>& args) {
-            if (args.empty()) { Session::replyWithCode(s.socket, ReplyCode::SyntaxError, ""); return; }
+            if (args.size() != 1) {
+                Session::replyWithCode(s.socket, ReplyCode::SyntaxError,
+                                       "Syntax: RETR <filename>");
+                return;
+            }
             std::filesystem::path resolved;
-            if (!g_pathResolver.resolve(s.currentDir, args[0], resolved) || !std::filesystem::exists(resolved)) {
+            std::error_code error;
+            if (!g_pathResolver.resolve(s.currentDir, args[0], resolved) ||
+                !std::filesystem::is_regular_file(resolved, error) || error) {
                 clearDataState(s);
                 Session::replyWithCode(s.socket, ReplyCode::ActionNotTaken, "File not found.");
                 return;
             }
-            if (s.dataChannelMode == DataChannelMode::None) {
-                Session::replyWithCode(s.socket, ReplyCode::CantOpenDataConnection,
-                                       "Use PORT or PASV before RETR.");
-                return;
-            }
-
-            std::unique_ptr<RdtSender> transport;
-            const bool passive = s.dataChannelMode == DataChannelMode::Passive;
-            if (passive) {
-                const SOCKET dataSocket = std::exchange(
-                    s.pendingDataSocket, INVALID_SOCKET);
-                transport = std::make_unique<RdtSender>(dataSocket);
-            } else {
-                char peerIp[INET_ADDRSTRLEN];
-                inet_ntop(AF_INET, &s.pendingPeerAddr.sin_addr, peerIp, sizeof(peerIp));
-                unsigned short peerPort = ntohs(s.pendingPeerAddr.sin_port);
-                transport = std::make_unique<RdtSender>(peerIp, peerPort);
-            }
-            s.dataChannelMode = DataChannelMode::None;
-            s.pendingPeerAddr = {};
-            if (!transport->isValid()) {
-                Session::replyWithCode(s.socket, ReplyCode::CantOpenDataConnection,
-                                       "Could not open data connection.");
-                return;
-            }
-
-            DataChannelSession channel(*transport);
-
-            Session::replyWithCode(s.socket, ReplyCode::FileStatusOkay, "Opening data connection.");
-            if (passive && !transport->waitForClientReady()) {
-                Session::replyWithCode(s.socket, ReplyCode::TransferAborted,
-                                       "Data handshake failed.");
-                return;
-            }
-            const SendResult result = channel.sendFile(resolved, s.transferMode);
-            if (result.success && s.transferMode == TransferMode::Binary) {
-                std::string msg = result.sha256.empty()
-                    ? "Transfer complete. Hash unavailable."
-                    : "Transfer complete. SHA256=" + result.sha256;
-                Session::replyWithCode(s.socket, ReplyCode::TransferComplete, msg);
-            }
-            else {
-                Session::replyWithCode(
-                    s.socket,
-                    result.success ? ReplyCode::TransferComplete
-                                   : ReplyCode::TransferAborted,
-                    result.success ? "Transfer complete." : "Transfer failed.");
-            }
+            startDownloadTransfer(s, resolved);
         } },
 
         { "STOR", [](ClientSession& s, const std::vector<std::string>& args) {
-            if (args.empty()) { Session::replyWithCode(s.socket, ReplyCode::SyntaxError, ""); return; }
+            if (args.size() != 1) {
+                Session::replyWithCode(s.socket, ReplyCode::SyntaxError,
+                                       "Syntax: STOR <filename>");
+                return;
+            }
             std::filesystem::path resolved;
             if (!g_pathResolver.resolve(s.currentDir, args[0], resolved)) {
                 clearDataState(s);
                 Session::replyWithCode(s.socket, ReplyCode::ActionNotTaken, "Path outside server root.");
                 return;
             }
-            if (s.dataChannelMode == DataChannelMode::None) {
-                Session::replyWithCode(s.socket, ReplyCode::CantOpenDataConnection,
-                                       "Use PORT or PASV before STOR.");
+            std::error_code error;
+            if (std::filesystem::is_directory(resolved, error)) {
+                clearDataState(s);
+                Session::replyWithCode(s.socket, ReplyCode::FilenameNotAllowed,
+                                       "Destination is a directory.");
                 return;
             }
+            startUploadTransfer(s, resolved, UploadKind::Store);
+        } },
 
-            const bool passive = s.dataChannelMode == DataChannelMode::Passive;
-            std::unique_ptr<RdtReceiver> transport;
-            if (passive) {
-                const SOCKET dataSocket = std::exchange(
-                    s.pendingDataSocket, INVALID_SOCKET);
-                transport = std::make_unique<RdtReceiver>(dataSocket);
-            } else {
-                transport = std::make_unique<RdtReceiver>(
-                    static_cast<uint16_t>(0));
-            }
-            const sockaddr_in activePeer = s.pendingPeerAddr;
-            s.dataChannelMode = DataChannelMode::None;
-            s.pendingPeerAddr = {};
-            if (!transport->isValid()) {
-                Session::replyWithCode(s.socket, ReplyCode::CantOpenDataConnection,
-                                       "Could not open data connection.");
+        { "STOU", [](ClientSession& s, const std::vector<std::string>& args) {
+            if (!args.empty()) {
+                Session::replyWithCode(s.socket, ReplyCode::SyntaxError,
+                                       "Syntax: STOU");
                 return;
             }
-
-            DataChannelSession channel(*transport);
-
-            Session::replyWithCode(s.socket, ReplyCode::FileStatusOkay, "Opening data connection.");
-            if (!passive && !transport->initiateActiveHandshake(activePeer)) {
-                Session::replyWithCode(s.socket, ReplyCode::TransferAborted,
-                                       "Data handshake failed.");
+            std::filesystem::path resolved;
+            std::string filename;
+            if (!reserveUniqueUpload(s.currentDir, resolved, filename)) {
+                clearDataState(s);
+                Session::replyWithCode(s.socket, ReplyCode::FilenameNotAllowed,
+                                       "Could not reserve a unique filename.");
                 return;
             }
-            bool ok = channel.receiveFile(resolved, s.transferMode);
-            if (ok && s.transferMode == TransferMode::Binary) {
-                std::string hash = Sha256Hasher::hashFile(resolved);
-                std::string msg = hash.empty()
-                    ? "Transfer complete. Hash unavailable."
-                    : "Transfer complete. SHA256=" + hash;
-                Session::replyWithCode(s.socket, ReplyCode::TransferComplete, msg);
+            startUploadTransfer(s, resolved, UploadKind::Unique, filename);
+        } },
+
+        { "APPE", [](ClientSession& s, const std::vector<std::string>& args) {
+            if (args.size() != 1) {
+                Session::replyWithCode(s.socket, ReplyCode::SyntaxError,
+                                       "Syntax: APPE <filename>");
+                return;
             }
-            else {
-                Session::replyWithCode(s.socket, ok ? ReplyCode::TransferComplete : ReplyCode::TransferAborted,
-                    ok ? "Transfer complete." : "Transfer failed.");
+            std::filesystem::path resolved;
+            if (!g_pathResolver.resolve(s.currentDir, args[0], resolved)) {
+                clearDataState(s);
+                Session::replyWithCode(s.socket, ReplyCode::ActionNotTaken,
+                                       "Path outside server root.");
+                return;
             }
+            std::error_code error;
+            if (std::filesystem::exists(resolved, error) &&
+                !std::filesystem::is_regular_file(resolved, error)) {
+                clearDataState(s);
+                Session::replyWithCode(s.socket, ReplyCode::FilenameNotAllowed,
+                                       "Destination is not a regular file.");
+                return;
+            }
+            startUploadTransfer(s, resolved, UploadKind::Append);
         } },
 
         { "HASH", [](ClientSession& s, const std::vector<std::string>& args) {
@@ -448,12 +722,49 @@ namespace CommandDispatcher{
         } },
 
         { "TYPE", [](ClientSession& s, const std::vector<std::string>& args) {
-            if (args.empty() || (args[0] != "A" && args[0] != "I")) {
+            if (args.size() != 1 || (args[0] != "A" && args[0] != "I")) {
                 Session::replyWithCode(s.socket, ReplyCode::SyntaxError, "TYPE must be A or I.");
                 return;
             }
             s.transferMode = (args[0] == "A") ? TransferMode::ASCII : TransferMode::Binary;
             Session::replyWithCode(s.socket, ReplyCode::ActionCompleted, "Type set to " + args[0] + ".");
+        } },
+
+        { "MODE", [](ClientSession& s, const std::vector<std::string>& args) {
+            if (args.size() != 1 ||
+                (args[0] != "S" && args[0] != "B" && args[0] != "C")) {
+                Session::replyWithCode(s.socket, ReplyCode::SyntaxError,
+                                       "MODE must be S, B, or C.");
+                return;
+            }
+            if (args[0] != "S") {
+                Session::replyWithCode(
+                    s.socket, ReplyCode::CommandNotImplementedForParameter,
+                    "Only MODE S is supported.");
+                return;
+            }
+            Session::replyWithCode(s.socket, ReplyCode::CommandOkay,
+                                   "Stream mode enabled.");
+        } },
+
+        { "ABOR", [](ClientSession& s, const std::vector<std::string>& args) {
+            if (!args.empty()) {
+                Session::replyWithCode(s.socket, ReplyCode::SyntaxError,
+                                       "Syntax: ABOR");
+                return;
+            }
+            if (!s.transferActive.load()) {
+                joinCompletedTransfer(s);
+                clearDataState(s);
+                sessionReply(s, ReplyCode::TransferComplete,
+                             "No transfer in progress.");
+                return;
+            }
+            s.abortRequested.store(true);
+            if (s.transferWorker.joinable()) s.transferWorker.join();
+            s.transferActive.store(false);
+            clearDataState(s);
+            sessionReply(s, ReplyCode::TransferAborted, "Transfer aborted.");
         } },
 
         { "HELP", [](ClientSession& s, const std::vector<std::string>& args) {
@@ -477,21 +788,35 @@ namespace CommandDispatcher{
                 }
             }
         } }
-
-        // To Do: STOU, APPE, ABOR
     };
-    
+
     void executeCommand(ClientSession& s, const ParsedCommand cmd){
+        if (!s.authenticated && cmd.type != "USER" && cmd.type != "PASS" &&
+            cmd.type != "HELP" && cmd.type != "NOOP" && cmd.type != "QUIT") {
+            Session::replyWithCode(s.socket, ReplyCode::NotLoggedIn,
+                                   "Please log in using USER and PASS.");
+            return;
+        }
+        if (s.transferActive.load() && cmd.type != "ABOR") {
+            sessionReply(s, ReplyCode::BadSequence,
+                         "Transfer already in progress; use ABOR first.");
+            return;
+        }
+        joinCompletedTransfer(s);
+
         auto it = commandMap.find(cmd.type);
         if (it != commandMap.end()) {
-            if (!s.authenticated && cmd.type != "USER" && cmd.type != "PASS" && 
-                cmd.type != "HELP" && cmd.type != "NOOP" && cmd.type != "QUIT") {
-                return Session::replyWithCode(s.socket, ReplyCode::NotLoggedIn, "Please log in using USER and PASS.");
-            }
             it->second(s, cmd.args);
         }
         else {
             Session::replyWithCode(s.socket, ReplyCode::SyntaxError, "Command not found: " + cmd.type);
         }
+    }
+
+    void shutdownSession(ClientSession& s) {
+        s.abortRequested.store(true);
+        if (s.transferWorker.joinable()) s.transferWorker.join();
+        s.transferActive.store(false);
+        clearDataState(s);
     }
 }

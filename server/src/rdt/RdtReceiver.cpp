@@ -1,6 +1,8 @@
 #include "RdtReceiver.h"
+#include <chrono>
 #include <cstring>
 #include <iostream>
+#include <utility>
 
 #include "../common/ProtocolConstants.h"
 
@@ -9,6 +11,8 @@
 #endif
 
 namespace {
+constexpr DWORD ABORT_POLL_TIMEOUT_MS = 100;
+
 DWORD receiverIdleTimeout() {
   return CHAOS_MODE ? CHAOS_DATA_IDLE_TIMEOUT_MS : DATA_IDLE_TIMEOUT_MS;
 }
@@ -32,6 +36,22 @@ bool hasValidChecksum(const char* bytes, int length) {
   return internetChecksum(reinterpret_cast<const uint8_t*>(checksumBuf), length) ==
          receivedChecksum;
 }
+}
+
+bool RdtReceiver::isAbortRequested() const {
+  return abortPredicate && abortPredicate();
+}
+
+void RdtReceiver::applyDataTimeout() {
+  const DWORD timeout = abortPredicate ? ABORT_POLL_TIMEOUT_MS
+                                       : receiverIdleTimeout();
+  setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO,
+             reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+}
+
+void RdtReceiver::setAbortPredicate(std::function<bool()> predicate) {
+  abortPredicate = std::move(predicate);
+  if (isValid()) applyDataTimeout();
 }
 
 // Constructor: creates a UDP socket and BINDS it to a port to listen
@@ -82,7 +102,7 @@ RdtReceiver::RdtReceiver(SOCKET existingSocket)
 }
 
 bool RdtReceiver::initiateActiveHandshake(const sockaddr_in& expectedPeer) {
-  if (!isValid()) return false;
+  if (!isValid() || isAbortRequested()) return false;
 
   peerAddr = expectedPeer;
   peerKnown = true;
@@ -104,6 +124,7 @@ bool RdtReceiver::initiateActiveHandshake(const sockaddr_in& expectedPeer) {
              sizeof(handshakeTimeout));
 
   for (int attempt = 0; attempt < HANDSHAKE_MAX_RETRIES; ++attempt) {
+    if (isAbortRequested()) return false;
     if (sendto(udpSocket, synBuffer, static_cast<int>(HEADER_SIZE), 0,
                reinterpret_cast<const sockaddr*>(&peerAddr),
                sizeof(peerAddr)) == SOCKET_ERROR) {
@@ -117,6 +138,7 @@ bool RdtReceiver::initiateActiveHandshake(const sockaddr_in& expectedPeer) {
         udpSocket, receiveBuffer, sizeof(receiveBuffer), 0,
         reinterpret_cast<sockaddr*>(&from), &fromLength);
     if (received == SOCKET_ERROR) {
+      if (isAbortRequested()) return false;
       if (WSAGetLastError() == WSAETIMEDOUT) continue;
       return false;
     }
@@ -127,26 +149,18 @@ bool RdtReceiver::initiateActiveHandshake(const sockaddr_in& expectedPeer) {
 
     const RdtHeader header = deserializeHeader(receiveBuffer);
     if ((header.flags & FLAG_ACK) && header.ack_num == syn.seq_num) {
-      DWORD idleTimeout = receiverIdleTimeout();
-      setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO,
-                 reinterpret_cast<const char*>(&idleTimeout),
-                 sizeof(idleTimeout));
+      applyDataTimeout();
       return true;
     }
     if (header.flags & FLAG_DATA) {
       pendingDatagram.assign(receiveBuffer, receiveBuffer + received);
       pendingFrom = from;
-      DWORD idleTimeout = receiverIdleTimeout();
-      setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO,
-                 reinterpret_cast<const char*>(&idleTimeout),
-                 sizeof(idleTimeout));
+      applyDataTimeout();
       return true;
     }
   }
 
-  DWORD idleTimeout = receiverIdleTimeout();
-  setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO,
-             reinterpret_cast<const char*>(&idleTimeout), sizeof(idleTimeout));
+  applyDataTimeout();
   std::cerr << "[Receiver] Active handshake timed out." << std::endl;
   return false;
 }
@@ -195,6 +209,9 @@ void RdtReceiver::sendAck(uint32_t ack_num, sockaddr_in &clientAddr) {
 bool RdtReceiver::receiveNext(uint32_t &outSeqNum, std::vector<char> &outData,
                               bool &outIsFinal) {
   const int WINDOW_SIZE = 10;
+  if (isAbortRequested()) return false;
+  const auto idleDeadline = std::chrono::steady_clock::now() +
+      std::chrono::milliseconds(receiverIdleTimeout());
 
   // 1. Check if the expected packet is already buffered
   auto it = outOfOrderBuffer.find(expected_seq);
@@ -212,6 +229,7 @@ bool RdtReceiver::receiveNext(uint32_t &outSeqNum, std::vector<char> &outData,
   int clientLen = sizeof(clientAddr);
 
   while (true) {
+    if (isAbortRequested()) return false;
     int n = 0;
     if (!pendingDatagram.empty()) {
       n = static_cast<int>(pendingDatagram.size());
@@ -226,6 +244,10 @@ bool RdtReceiver::receiveNext(uint32_t &outSeqNum, std::vector<char> &outData,
     if (n == SOCKET_ERROR) {
       int err = WSAGetLastError();
       if (err == WSAETIMEDOUT) {
+        if (isAbortRequested()) return false;
+        if (abortPredicate && std::chrono::steady_clock::now() < idleDeadline) {
+          continue;
+        }
         std::cerr << "[Receiver] Timed out waiting for DATA." << std::endl;
         return false;
       }

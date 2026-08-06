@@ -5,6 +5,7 @@
 #include <string>
 #include <map>
 #include <vector>
+#include <functional>
 
 class RdtReceiver : public IRdtTransport
 {
@@ -17,9 +18,12 @@ private:
     bool peerKnown = false;
     std::vector<char> pendingDatagram;
     sockaddr_in pendingFrom{};
+    std::function<bool()> abortPredicate;
 
     // Helper to send an ACK back to whatever address just sent us data
     void sendAck(uint32_t ack_num, sockaddr_in &clientAddr);
+    bool isAbortRequested() const;
+    void applyDataTimeout();
 
 public:
     // Constructor binds the socket to a specific port to listen
@@ -41,4 +45,5 @@ public:
     bool flush() override { return true; }
     bool isValid() const noexcept { return udpSocket != INVALID_SOCKET; }
     bool initiateActiveHandshake(const sockaddr_in& expectedPeer);
+    void setAbortPredicate(std::function<bool()> predicate);
 };

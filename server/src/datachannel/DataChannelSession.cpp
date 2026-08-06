@@ -7,10 +7,17 @@
 #include "Sha256Hasher.h"
 
 #include <windows.h>
+#include <functional>
 #include <system_error>
+#include <utility>
 
-DataChannelSession::DataChannelSession(IRdtTransport& transport)
-    : transport(transport) {}
+DataChannelSession::DataChannelSession(IRdtTransport& transport,
+                                       AbortPredicate abortRequested)
+    : transport(transport), abortRequested(std::move(abortRequested)) {}
+
+bool DataChannelSession::isAborted() const {
+    return abortRequested && abortRequested();
+}
 
 namespace {
 class SourceSnapshot {
@@ -54,26 +61,31 @@ private:
 };
 
 template <typename Reader>
-bool sendFromReader(Reader& reader, IRdtTransport& transport) {
+bool sendFromReader(Reader& reader, IRdtTransport& transport,
+                    const DataChannelSession::AbortPredicate& abortRequested) {
     std::vector<char> currentChunk;
     std::vector<char> nextChunk;
     uint32_t seq = 0;
 
-    if (!reader.isOpen()) return false;
+    const auto aborted = [&] { return abortRequested && abortRequested(); };
+
+    if (!reader.isOpen() || aborted()) return false;
     if (!reader.nextChunk(currentChunk)) {
-        return transport.sendChunk(0, nullptr, 0, true) && transport.flush();
+        return !aborted() && transport.sendChunk(0, nullptr, 0, true) &&
+               !aborted() && transport.flush();
     }
 
     while (true) {
         const bool hasNext = reader.nextChunk(nextChunk);
-        if (!transport.sendChunk(seq, currentChunk.data(), currentChunk.size(),
+        if (aborted() ||
+            !transport.sendChunk(seq, currentChunk.data(), currentChunk.size(),
                                  !hasNext)) return false;
         ++seq;
         if (!hasNext) break;
         currentChunk.swap(nextChunk);
         nextChunk.clear();
     }
-    return transport.flush();
+    return !aborted() && transport.flush() && !aborted();
 }
 }
 
@@ -87,10 +99,10 @@ SendResult DataChannelSession::sendFile(const std::filesystem::path& filePath,
         result.sha256 = Sha256Hasher::hashFile(snapshot.path());
         if (result.sha256.empty()) return result;
         ChunkedFileReader reader(snapshot.path());
-        result.success = sendFromReader(reader, transport);
+        result.success = sendFromReader(reader, transport, abortRequested);
     } else {
         AsciiChunkedReader reader(snapshot.path());
-        result.success = sendFromReader(reader, transport);
+        result.success = sendFromReader(reader, transport, abortRequested);
     }
     return result;
 }
@@ -105,12 +117,13 @@ bool DataChannelSession::receiveFile(const std::filesystem::path& destPath, Tran
     AsciiTranslator translator;
 
     while (true) {
-        if (!transport.receiveNext(seq, data, isFinal)) return false;
+        if (isAborted() || !transport.receiveNext(seq, data, isFinal) ||
+            isAborted()) return false;
         if (mode == TransferMode::ASCII) data = translator.decode(data);
         if (!writer.appendChunk(seq, data)) return false;
 
         if (isFinal) break;
     }
 
-    return writer.commit();
+    return !isAborted() && writer.commit();
 }

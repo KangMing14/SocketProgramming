@@ -62,17 +62,32 @@ DirectoryService::Result DirectoryService::removeDir(const fs::path& currentDir,
 	return { true, ReplyCode::ActionCompleted, "Directory removed" };
 }
 
-bool DirectoryService::listDir(const fs::path& currentDir, std::vector<DirEntryInfo>& outEntries) const {
+bool DirectoryService::listDir(const fs::path& currentDir, const std::string& target,
+                               std::vector<DirEntryInfo>& outEntries) const {
 	outEntries.clear();
 	std::error_code ec;
+	fs::path resolved;
+	if (!resolver.resolve(currentDir, target, resolved)) return false;
+	if (!fs::exists(resolved, ec) || ec) return false;
 
-	for (const auto& entry : fs::directory_iterator(currentDir, ec)) {
+	auto appendEntry = [&](const fs::path& path) {
 		DirEntryInfo info;
-		info.formatPermissions = getFormatPermissions(entry.path());
-		info.name = entry.path().filename().string();
-		info.isDirectory = entry.is_directory();
-		info.sizeBytes = info.isDirectory ? 0 : std::filesystem::file_size(entry.path(), ec);
-		outEntries.push_back(info);
+		info.formatPermissions = getFormatPermissions(path);
+		info.name = path.filename().string();
+		info.isDirectory = fs::is_directory(path, ec);
+		if (ec) return false;
+		info.sizeBytes = info.isDirectory ? 0 : fs::file_size(path, ec);
+		if (ec) return false;
+		outEntries.push_back(std::move(info));
+		return true;
+	};
+
+	if (!fs::is_directory(resolved, ec)) {
+		return !ec && appendEntry(resolved);
+	}
+
+	for (const auto& entry : fs::directory_iterator(resolved, ec)) {
+		if (!appendEntry(entry.path())) return false;
 	}
 	return !ec;
 }

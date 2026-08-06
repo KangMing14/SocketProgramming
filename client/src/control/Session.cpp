@@ -10,9 +10,13 @@
 #include "../crypto/Sha256Hasher.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <filesystem>
+#include <memory>
 #include <sstream>
+#include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -34,6 +38,9 @@ struct ClientState {
     sockaddr_in serverAddress{};
     TransferMode transferMode = TransferMode::Binary;
     std::string replyBuffer;
+    std::atomic_bool transferActive{false};
+    std::atomic_bool abortRequested{false};
+    std::thread transferWorker;
 };
 
 void closeDataState(ClientState& state) {
@@ -43,6 +50,12 @@ void closeDataState(ClientState& state) {
     }
     state.passiveAddress = {};
     state.dataMode = DataMode::None;
+}
+
+void joinCompletedTransfer(ClientState& state) {
+    if (!state.transferActive.load() && state.transferWorker.joinable()) {
+        state.transferWorker.join();
+    }
 }
 
 bool sendAll(SOCKET socket, const std::string& bytes) {
@@ -215,8 +228,13 @@ bool enterPassiveMode(SOCKET controlSocket, ClientState& state,
 
 bool storeFile(SOCKET controlSocket, ClientState& state,
                const std::vector<std::string>& tokens) {
-    if (tokens.size() < 2 || tokens.size() > 3) {
-        std::cerr << "Usage: STOR <local-path> [remote-path]\n";
+    const std::string verb = upper(tokens.empty() ? "" : tokens[0]);
+    const bool unique = verb == "STOU";
+    if ((unique && tokens.size() != 2) ||
+        (!unique && (tokens.size() < 2 || tokens.size() > 3))) {
+        std::cerr << (unique
+            ? "Usage: STOU <local-path>\n"
+            : "Usage: " + verb + " <local-path> [remote-path]\n");
         return true;
     }
     const std::filesystem::path localPath = tokens[1];
@@ -230,13 +248,14 @@ bool storeFile(SOCKET controlSocket, ClientState& state,
         return true;
     }
 
-    const std::string remotePath =
-        tokens.size() == 3 ? tokens[2] : localPath.filename().string();
-    if (remotePath.empty()) {
+    const std::string remotePath = unique ? std::string{} :
+        (tokens.size() == 3 ? tokens[2] : localPath.filename().string());
+    if (!unique && remotePath.empty()) {
         std::cerr << "A remote filename is required.\n";
         return true;
     }
-    if (!sendCommand(controlSocket, "STOR " + remotePath)) return false;
+    const std::string serverCommand = unique ? "STOU" : verb + " " + remotePath;
+    if (!sendCommand(controlSocket, serverCommand)) return false;
 
     Reply preliminary;
     if (!printReply(controlSocket, state, preliminary)) return false;
@@ -248,41 +267,66 @@ bool storeFile(SOCKET controlSocket, ClientState& state,
     const DataMode mode = state.dataMode;
     const SOCKET dataSocket = std::exchange(
         state.pendingDataSocket, INVALID_SOCKET);
+    const sockaddr_in passiveAddress = state.passiveAddress;
+    const sockaddr_in serverAddress = state.serverAddress;
+    const TransferMode transferMode = state.transferMode;
     state.dataMode = DataMode::None;
-
-    hybridftp::client::SendResult sendResult;
-    if (mode == DataMode::Passive) {
-        hybridftp::client::RdtSender sender(
-            dataSocket, state.passiveAddress);
-        hybridftp::client::DataChannelSession channel(sender);
-        if (sender.isValid()) {
-            sendResult = channel.sendFile(localPath, state.transferMode);
-        }
-    } else {
-        hybridftp::client::RdtSender sender(dataSocket);
-        hybridftp::client::DataChannelSession channel(sender);
-        if (sender.waitForServerReady(state.serverAddress.sin_addr)) {
-            sendResult = channel.sendFile(localPath, state.transferMode);
-        }
-    }
     state.passiveAddress = {};
+    joinCompletedTransfer(state);
+    state.abortRequested.store(false);
+    state.transferActive.store(true);
 
-    Reply completion;
-    if (!printReply(controlSocket, state, completion)) return false;
-    if (!sendResult.success || completion.code != ReplyCode::TransferComplete) {
-        std::cerr << "Upload failed.\n";
-    } else if (state.transferMode == TransferMode::Binary &&
-               !sendResult.sha256.empty()) {
-        std::string serverHash;
-        if (extractHash(completion.line, serverHash)) {
-            if (serverHash == sendResult.sha256) {
-                std::cout << "Integrity verified: SHA-256 matches (" << serverHash << ")\n";
-            }
-            else {
-                std::cerr << "WARNING: hash mismatch! Local=" << sendResult.sha256
-                    << " Server=" << serverHash << "\n";
-            }
-        }
+    try {
+        state.transferWorker = std::thread(
+            [controlSocket, &state, localPath, mode, dataSocket,
+             passiveAddress, serverAddress, transferMode]() {
+                const auto aborted = [&state] {
+                    return state.abortRequested.load();
+                };
+                std::unique_ptr<hybridftp::client::RdtSender> sender;
+                if (mode == DataMode::Passive) {
+                    sender = std::make_unique<hybridftp::client::RdtSender>(
+                        dataSocket, passiveAddress);
+                } else {
+                    sender = std::make_unique<hybridftp::client::RdtSender>(
+                        dataSocket);
+                }
+                sender->setAbortPredicate(aborted);
+                hybridftp::client::DataChannelSession channel(*sender, aborted);
+                hybridftp::client::SendResult sendResult;
+                const bool ready = mode == DataMode::Passive ||
+                    sender->waitForServerReady(serverAddress.sin_addr);
+                if (ready && !aborted()) {
+                    sendResult = channel.sendFile(localPath, transferMode);
+                }
+
+                Reply completion;
+                const bool replyOkay = printReply(controlSocket, state, completion);
+                if (replyOkay && !aborted() &&
+                    (!sendResult.success ||
+                     completion.code != ReplyCode::TransferComplete)) {
+                    std::cerr << "Upload failed.\n";
+                } else if (replyOkay && !aborted() &&
+                           transferMode == TransferMode::Binary &&
+                           !sendResult.sha256.empty()) {
+                    std::string serverHash;
+                    if (extractHash(completion.line, serverHash)) {
+                        if (serverHash == sendResult.sha256) {
+                            std::cout << "Integrity verified: SHA-256 matches ("
+                                      << serverHash << ")\n";
+                        } else {
+                            std::cerr << "WARNING: hash mismatch! Local="
+                                      << sendResult.sha256 << " Server="
+                                      << serverHash << "\n";
+                        }
+                    }
+                }
+                state.transferActive.store(false);
+            });
+    } catch (const std::system_error&) {
+        closesocket(dataSocket);
+        state.transferActive.store(false);
+        std::cerr << "Could not start the upload worker.\n";
     }
     return true;
 }
@@ -319,35 +363,61 @@ bool retrieveFile(SOCKET controlSocket, ClientState& state,
     const DataMode mode = state.dataMode;
     const SOCKET dataSocket = std::exchange(
         state.pendingDataSocket, INVALID_SOCKET);
+    const sockaddr_in passiveAddress = state.passiveAddress;
+    const sockaddr_in serverAddress = state.serverAddress;
+    const TransferMode transferMode = state.transferMode;
     state.dataMode = DataMode::None;
-
-    hybridftp::client::RdtReceiver receiver(dataSocket);
-    receiver.expectPeerIp(state.serverAddress.sin_addr);
-    bool ready = receiver.isValid();
-    if (ready && mode == DataMode::Passive) {
-        ready = receiver.signalClientReady(state.passiveAddress);
-    }
-    hybridftp::client::DataChannelSession channel(receiver);
-    const bool transferOkay = ready &&
-        channel.receiveFile(localPath, state.transferMode);
     state.passiveAddress = {};
+    joinCompletedTransfer(state);
+    state.abortRequested.store(false);
+    state.transferActive.store(true);
 
-    Reply completion;
-    if (!printReply(controlSocket, state, completion)) return false;
-    if (!transferOkay || completion.code != ReplyCode::TransferComplete) {
-        std::cerr << "Download failed.\n";
-    } else if (state.transferMode == TransferMode::Binary) {
-        std::string serverHash;
-        if (extractHash(completion.line, serverHash)) {
-            std::string localHash = Sha256Hasher::hashFile(localPath);
-            if (localHash == serverHash) {
-                std::cout << "Integrity verified: SHA-256 matches (" << serverHash << ")\n";
-            }
-            else {
-                std::cerr << "WARNING: hash mismatch! Local=" << localHash
-                    << " Server=" << serverHash << "\n";
-            }
-        }
+    try {
+        state.transferWorker = std::thread(
+            [controlSocket, &state, localPath, mode, dataSocket,
+             passiveAddress, serverAddress, transferMode]() {
+                const auto aborted = [&state] {
+                    return state.abortRequested.load();
+                };
+                hybridftp::client::RdtReceiver receiver(dataSocket);
+                receiver.setAbortPredicate(aborted);
+                receiver.expectPeerIp(serverAddress.sin_addr);
+                bool ready = receiver.isValid();
+                if (ready && mode == DataMode::Passive) {
+                    ready = receiver.signalClientReady(passiveAddress);
+                }
+                hybridftp::client::DataChannelSession channel(receiver, aborted);
+                const bool transferOkay = ready && !aborted() &&
+                    channel.receiveFile(localPath, transferMode);
+
+                Reply completion;
+                const bool replyOkay = printReply(controlSocket, state, completion);
+                if (replyOkay && !aborted() &&
+                    (!transferOkay ||
+                     completion.code != ReplyCode::TransferComplete)) {
+                    std::cerr << "Download failed.\n";
+                } else if (replyOkay && !aborted() &&
+                           transferMode == TransferMode::Binary) {
+                    std::string serverHash;
+                    if (extractHash(completion.line, serverHash)) {
+                        const std::string localHash =
+                            Sha256Hasher::hashFile(localPath);
+                        if (localHash == serverHash) {
+                            std::cout << "Integrity verified: SHA-256 matches ("
+                                      << serverHash << ")\n";
+                        } else {
+                            std::cerr << "WARNING: hash mismatch! Local="
+                                      << localHash << " Server="
+                                      << serverHash << "\n";
+                        }
+                    }
+                }
+                state.transferActive.store(false);
+            });
+    } catch (const std::system_error&) {
+        closesocket(dataSocket);
+        state.transferActive.store(false);
+        std::cerr << "Could not start the download worker.\n";
     }
     return true;
 }
@@ -420,11 +490,25 @@ void runClientSession(SOCKET serverSocket) {
         const std::string verb = upper(tokens[0]);
 
         bool connected = true;
+        if (state.transferActive.load()) {
+            if (verb != "ABOR" || tokens.size() != 1) {
+                std::cerr << "Transfer already in progress; use ABOR first.\n";
+                continue;
+            }
+            state.abortRequested.store(true);
+            connected = sendCommand(serverSocket, "ABOR");
+            if (state.transferWorker.joinable()) state.transferWorker.join();
+            state.transferActive.store(false);
+            if (!connected) break;
+            continue;
+        }
+
+        joinCompletedTransfer(state);
         if (verb == "PORT") {
             connected = enterActiveMode(serverSocket, state, tokens);
         } else if (verb == "PASV") {
             connected = enterPassiveMode(serverSocket, state, tokens);
-        } else if (verb == "STOR") {
+        } else if (verb == "STOR" || verb == "STOU" || verb == "APPE") {
             connected = storeFile(serverSocket, state, tokens);
         } else if (verb == "RETR") {
             connected = retrieveFile(serverSocket, state, tokens);
@@ -434,6 +518,11 @@ void runClientSession(SOCKET serverSocket) {
 
         if (!connected || verb == "QUIT") break;
     }
+    if (state.transferActive.load()) {
+        state.abortRequested.store(true);
+        sendCommand(serverSocket, "ABOR");
+    }
+    if (state.transferWorker.joinable()) state.transferWorker.join();
     closeDataState(state);
 }
 

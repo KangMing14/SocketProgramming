@@ -23,6 +23,7 @@ namespace ReplyCode {
 
     constexpr int SyntaxError = 500;
     constexpr int BadSequence = 503;
+    constexpr int CommandNotImplementedForParameter = 504;
     constexpr int NotLoggedIn = 530;
     constexpr int ActionNotTaken = 550;
     constexpr int FilenameNotAllowed = 553;
