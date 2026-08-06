@@ -230,11 +230,6 @@ bool storeFile(SOCKET controlSocket, ClientState& state,
         return true;
     }
 
-    std::string localHash;
-    if (state.transferMode == TransferMode::Binary) {
-        localHash = Sha256Hasher::hashFile(localPath);
-    }
-
     const std::string remotePath =
         tokens.size() == 3 ? tokens[2] : localPath.filename().string();
     if (remotePath.empty()) {
@@ -255,34 +250,36 @@ bool storeFile(SOCKET controlSocket, ClientState& state,
         state.pendingDataSocket, INVALID_SOCKET);
     state.dataMode = DataMode::None;
 
-    bool transferOkay = false;
+    hybridftp::client::SendResult sendResult;
     if (mode == DataMode::Passive) {
         hybridftp::client::RdtSender sender(
             dataSocket, state.passiveAddress);
         hybridftp::client::DataChannelSession channel(sender);
-        transferOkay = sender.isValid() &&
-                       channel.sendFile(localPath, state.transferMode);
+        if (sender.isValid()) {
+            sendResult = channel.sendFile(localPath, state.transferMode);
+        }
     } else {
         hybridftp::client::RdtSender sender(dataSocket);
         hybridftp::client::DataChannelSession channel(sender);
-        transferOkay = sender.waitForServerReady(
-                           state.serverAddress.sin_addr) &&
-                       channel.sendFile(localPath, state.transferMode);
+        if (sender.waitForServerReady(state.serverAddress.sin_addr)) {
+            sendResult = channel.sendFile(localPath, state.transferMode);
+        }
     }
     state.passiveAddress = {};
 
     Reply completion;
     if (!printReply(controlSocket, state, completion)) return false;
-    if (!transferOkay || completion.code != ReplyCode::TransferComplete) {
+    if (!sendResult.success || completion.code != ReplyCode::TransferComplete) {
         std::cerr << "Upload failed.\n";
-    } else if (state.transferMode == TransferMode::Binary && !localHash.empty()) {
+    } else if (state.transferMode == TransferMode::Binary &&
+               !sendResult.sha256.empty()) {
         std::string serverHash;
         if (extractHash(completion.line, serverHash)) {
-            if (serverHash == localHash) {
+            if (serverHash == sendResult.sha256) {
                 std::cout << "Integrity verified: SHA-256 matches (" << serverHash << ")\n";
             }
             else {
-                std::cerr << "WARNING: hash mismatch! Local=" << localHash
+                std::cerr << "WARNING: hash mismatch! Local=" << sendResult.sha256
                     << " Server=" << serverHash << "\n";
             }
         }

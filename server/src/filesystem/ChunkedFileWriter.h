@@ -1,26 +1,30 @@
 #pragma once
 
 #include <fstream>
-#include <map>
 #include <filesystem>
 #include <cstdint>
 #include <vector>
-#include <functional>
 
 namespace fs = std::filesystem;
 
 class ChunkedFileWriter {
 public:
-
-    // @param destination path
     explicit ChunkedFileWriter(const fs::path& filePath);
-    bool isValid() const;
+    ~ChunkedFileWriter();
 
-    void addChunk(uint32_t seqNum, const std::vector<char>& data);
-    bool finalize(uint32_t expectedChunkCount, 
-                    const std::function<std::vector<char>(const std::vector<char>&)>& transform = nullptr);
+    ChunkedFileWriter(const ChunkedFileWriter&) = delete;
+    ChunkedFileWriter& operator=(const ChunkedFileWriter&) = delete;
+
+    bool isValid() const;
+    bool appendChunk(uint32_t seqNum, const std::vector<char>& data);
+    bool commit();
+    void abort();
 
 private:
-    fs::path filePath;
-    std::map<uint32_t, std::vector<char>> pendingChunks;
+    fs::path destinationPath;
+    fs::path temporaryPath;
+    std::ofstream output;
+    uint32_t nextExpectedSequence = 0;
+    bool committed = false;
+    bool valid = false;
 };
