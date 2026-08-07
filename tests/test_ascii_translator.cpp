@@ -70,10 +70,10 @@ void test_full_pipeline_ascii_round_trip() {
 
     FakeRdtTransport transport;
     DataChannelSession sender(transport);
-    assert(sender.sendFile("mixed_endings.txt", TransferMode::ASCII) == true);
+    assert(sender.sendFile("mixed_endings.txt", TransferType::ASCII) == true);
 
     DataChannelSession receiver(transport);
-    assert(receiver.receiveFile("mixed_endings_result.txt", TransferMode::ASCII) == true);
+    assert(receiver.receiveFile("mixed_endings_result.txt", TransferType::ASCII) == true);
 
     std::ifstream result("mixed_endings_result.txt", std::ios::binary);
     std::string content((std::istreambuf_iterator<char>(result)), std::istreambuf_iterator<char>());

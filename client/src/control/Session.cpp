@@ -36,7 +36,8 @@ struct ClientState {
     SOCKET pendingDataSocket = INVALID_SOCKET;
     sockaddr_in passiveAddress{};
     sockaddr_in serverAddress{};
-    TransferMode transferMode = TransferMode::Binary;
+    TransferType transferType = TransferType::Binary;
+    TransferMode transferMode = TransferMode::Stream;
     std::string replyBuffer;
     std::atomic_bool transferActive{false};
     std::atomic_bool abortRequested{false};
@@ -269,6 +270,7 @@ bool storeFile(SOCKET controlSocket, ClientState& state,
         state.pendingDataSocket, INVALID_SOCKET);
     const sockaddr_in passiveAddress = state.passiveAddress;
     const sockaddr_in serverAddress = state.serverAddress;
+    const TransferType transferType = state.transferType;
     const TransferMode transferMode = state.transferMode;
     state.dataMode = DataMode::None;
     state.passiveAddress = {};
@@ -279,7 +281,7 @@ bool storeFile(SOCKET controlSocket, ClientState& state,
     try {
         state.transferWorker = std::thread(
             [controlSocket, &state, localPath, mode, dataSocket,
-             passiveAddress, serverAddress, transferMode]() {
+             passiveAddress, serverAddress, transferType, transferMode]() {
                 const auto aborted = [&state] {
                     return state.abortRequested.load();
                 };
@@ -297,7 +299,8 @@ bool storeFile(SOCKET controlSocket, ClientState& state,
                 const bool ready = mode == DataMode::Passive ||
                     sender->waitForServerReady(serverAddress.sin_addr);
                 if (ready && !aborted()) {
-                    sendResult = channel.sendFile(localPath, transferMode);
+                    sendResult = channel.sendFile(localPath, transferType,
+                                                  transferMode);
                 }
 
                 Reply completion;
@@ -307,7 +310,7 @@ bool storeFile(SOCKET controlSocket, ClientState& state,
                      completion.code != ReplyCode::TransferComplete)) {
                     std::cerr << "Upload failed.\n";
                 } else if (replyOkay && !aborted() &&
-                           transferMode == TransferMode::Binary &&
+                           transferType == TransferType::Binary &&
                            !sendResult.sha256.empty()) {
                     std::string serverHash;
                     if (extractHash(completion.line, serverHash)) {
@@ -365,6 +368,7 @@ bool retrieveFile(SOCKET controlSocket, ClientState& state,
         state.pendingDataSocket, INVALID_SOCKET);
     const sockaddr_in passiveAddress = state.passiveAddress;
     const sockaddr_in serverAddress = state.serverAddress;
+    const TransferType transferType = state.transferType;
     const TransferMode transferMode = state.transferMode;
     state.dataMode = DataMode::None;
     state.passiveAddress = {};
@@ -375,7 +379,7 @@ bool retrieveFile(SOCKET controlSocket, ClientState& state,
     try {
         state.transferWorker = std::thread(
             [controlSocket, &state, localPath, mode, dataSocket,
-             passiveAddress, serverAddress, transferMode]() {
+             passiveAddress, serverAddress, transferType, transferMode]() {
                 const auto aborted = [&state] {
                     return state.abortRequested.load();
                 };
@@ -388,7 +392,7 @@ bool retrieveFile(SOCKET controlSocket, ClientState& state,
                 }
                 hybridftp::client::DataChannelSession channel(receiver, aborted);
                 const bool transferOkay = ready && !aborted() &&
-                    channel.receiveFile(localPath, transferMode);
+                    channel.receiveFile(localPath, transferType, transferMode);
 
                 Reply completion;
                 const bool replyOkay = printReply(controlSocket, state, completion);
@@ -397,7 +401,7 @@ bool retrieveFile(SOCKET controlSocket, ClientState& state,
                      completion.code != ReplyCode::TransferComplete)) {
                     std::cerr << "Download failed.\n";
                 } else if (replyOkay && !aborted() &&
-                           transferMode == TransferMode::Binary) {
+                           transferType == TransferType::Binary) {
                     std::string serverHash;
                     if (extractHash(completion.line, serverHash)) {
                         const std::string localHash =
@@ -432,8 +436,14 @@ bool forwardCommand(SOCKET controlSocket, ClientState& state,
     if (!tokens.empty() && upper(tokens[0]) == "TYPE" &&
         tokens.size() == 2 && reply.code >= 200 && reply.code < 300) {
         const std::string type = upper(tokens[1]);
-        if (type == "A") state.transferMode = TransferMode::ASCII;
-        if (type == "I") state.transferMode = TransferMode::Binary;
+        if (type == "A") state.transferType = TransferType::ASCII;
+        if (type == "I") state.transferType = TransferType::Binary;
+    }
+    if (!tokens.empty() && upper(tokens[0]) == "MODE" &&
+        tokens.size() == 2 && reply.code >= 200 && reply.code < 300) {
+        const std::string mode = upper(tokens[1]);
+        if (mode == "S") state.transferMode = TransferMode::Stream;
+        if (mode == "B") state.transferMode = TransferMode::Block;
     }
     return true;
 }

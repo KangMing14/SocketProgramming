@@ -190,12 +190,13 @@ void startDownloadTransfer(ClientSession& session,
 
     session.abortRequested.store(false);
     session.transferActive.store(true);
+    const TransferType transferType = session.transferType;
     const TransferMode transferMode = session.transferMode;
     sessionReply(session, ReplyCode::FileStatusOkay, "Opening data connection.");
 
     try {
         session.transferWorker = std::thread(
-            [&session, source, transferMode, passive,
+            [&session, source, transferType, transferMode, passive,
              transport = std::move(transport)]() mutable {
                 const auto aborted = [&session] {
                     return session.abortRequested.load();
@@ -205,12 +206,12 @@ void startDownloadTransfer(ClientSession& session,
                 DataChannelSession channel(*transport, aborted);
                 SendResult result;
                 if (ready && !aborted()) {
-                    result = channel.sendFile(source, transferMode);
+                    result = channel.sendFile(source, transferType, transferMode);
                 }
                 finishTransfer(
                     session, result.success,
                     transferCompleteMessage(
-                        transferMode == TransferMode::Binary
+                        transferType == TransferType::Binary
                             ? result.sha256 : std::string{}));
             });
     } catch (const std::system_error&) {
@@ -270,12 +271,13 @@ void startUploadTransfer(ClientSession& session,
     session.abortRequested.store(false);
     session.transferActive.store(true);
     session.pendingUniqueFilename = uniqueFilename;
+    const TransferType transferType = session.transferType;
     const TransferMode transferMode = session.transferMode;
     sessionReply(session, ReplyCode::FileStatusOkay, "Opening data connection.");
 
     try {
         session.transferWorker = std::thread(
-            [&session, destination, stagingPath, transferMode, passive,
+            [&session, destination, stagingPath, transferType, transferMode, passive,
              activePeer, kind, uniqueFilename,
              transport = std::move(transport)]() mutable {
                 const auto aborted = [&session] {
@@ -288,7 +290,7 @@ void startUploadTransfer(ClientSession& session,
                     kind == UploadKind::Append ? stagingPath : destination;
                 DataChannelSession channel(*transport, aborted);
                 bool success = ready && !aborted() &&
-                    channel.receiveFile(receivePath, transferMode);
+                    channel.receiveFile(receivePath, transferType, transferMode);
                 if (success && kind == UploadKind::Append && !aborted()) {
                     success = appendAtomically(destination, stagingPath);
                 }
@@ -302,7 +304,7 @@ void startUploadTransfer(ClientSession& session,
                 }
 
                 std::string hash;
-                if (success && transferMode == TransferMode::Binary) {
+                if (success && transferType == TransferType::Binary) {
                     hash = Sha256Hasher::hashFile(destination);
                 }
                 finishTransfer(
@@ -388,7 +390,7 @@ namespace CommandDispatcher{
         },
         { "MODE",
             "Syntax: MODE {S | B | C}\n"
-            "Set the transfer mode. Stream (S) is supported; Block (B) and Compressed (C) return 504."
+            "Set the transfer mode. S = Stream, B = FTP Block; C is not supported."
         },
         { "PORT", 
             "Syntax: PORT <h1,h2,h3,h4,p1,p2>\n"
@@ -726,7 +728,8 @@ namespace CommandDispatcher{
                 Session::replyWithCode(s.socket, ReplyCode::SyntaxError, "TYPE must be A or I.");
                 return;
             }
-            s.transferMode = (args[0] == "A") ? TransferMode::ASCII : TransferMode::Binary;
+            s.transferType = (args[0] == "A")
+                ? TransferType::ASCII : TransferType::Binary;
             Session::replyWithCode(s.socket, ReplyCode::ActionCompleted, "Type set to " + args[0] + ".");
         } },
 
@@ -737,14 +740,17 @@ namespace CommandDispatcher{
                                        "MODE must be S, B, or C.");
                 return;
             }
-            if (args[0] != "S") {
+            if (args[0] == "C") {
                 Session::replyWithCode(
                     s.socket, ReplyCode::CommandNotImplementedForParameter,
-                    "Only MODE S is supported.");
+                    "MODE C is not supported.");
                 return;
             }
+            s.transferMode = args[0] == "B"
+                ? TransferMode::Block : TransferMode::Stream;
             Session::replyWithCode(s.socket, ReplyCode::CommandOkay,
-                                   "Stream mode enabled.");
+                args[0] == "B" ? "Block mode enabled."
+                               : "Stream mode enabled.");
         } },
 
         { "ABOR", [](ClientSession& s, const std::vector<std::string>& args) {

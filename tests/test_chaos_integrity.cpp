@@ -177,7 +177,7 @@ bool runOneChaosTransfer(
         RdtSender sender("127.0.0.1", port);
         DataChannelSession channel(sender);
         const bool sendSucceeded =
-            channel.sendFile(source, TransferMode::Binary);
+            channel.sendFile(source, TransferType::Binary);
 
         const bool receiveSucceeded = receiveResult.get();
         receiverThread.join();

@@ -139,7 +139,8 @@ SOCKET prepareActiveEndpoint(SOCKET control, ReplyReader& replies) {
 }
 
 Reply activeUpload(SOCKET control, ReplyReader& replies,
-                   const std::string& command, const fs::path& source) {
+                   const std::string& command, const fs::path& source,
+                   TransferMode transferMode = TransferMode::Stream) {
     SOCKET dataSocket = prepareActiveEndpoint(control, replies);
     sendCommand(control, command);
     require(replies.read(control).code == ReplyCode::FileStatusOkay,
@@ -151,7 +152,7 @@ Reply activeUpload(SOCKET control, ReplyReader& replies,
     require(sender.waitForServerReady(loopback),
             "Client did not receive the server SYN");
     hybridftp::client::DataChannelSession channel(sender);
-    require(channel.sendFile(source, TransferMode::Binary),
+    require(channel.sendFile(source, TransferType::Binary, transferMode),
             "Client upload failed");
     return replies.read(control);
 }
@@ -205,14 +206,12 @@ int main() {
         require(replies.read(control).code == ReplyCode::CommandOkay,
                 "MODE S was not accepted");
         sendCommand(control, "MODE B");
-        require(replies.read(control).code ==
-                    ReplyCode::CommandNotImplementedForParameter,
-                "MODE B was not rejected with 504");
+        require(replies.read(control).code == ReplyCode::CommandOkay,
+                "MODE B was not accepted");
         sendCommand(control, "MODE C");
         require(replies.read(control).code ==
                     ReplyCode::CommandNotImplementedForParameter,
                 "MODE C was not rejected with 504");
-
         sendCommand(control, "LIST subdir");
         Reply listing = replies.read(control);
         require(listing.code == ReplyCode::ActionCompleted &&
@@ -226,13 +225,17 @@ int main() {
                 "NLST path listing was not name-only");
 
         const Reply firstUnique = activeUpload(
-            control, replies, "STOU", firstSource);
+            control, replies, "STOU", firstSource, TransferMode::Block);
         require(firstUnique.code == ReplyCode::TransferComplete,
                 "First STOU did not complete");
         const std::string firstName = extractFilename(firstUnique.line);
         require(fs::path(firstName).parent_path().empty() &&
                     readText(g_pathResolver.root() / firstName) == "alpha",
                 "First STOU filename or contents were invalid");
+
+        sendCommand(control, "MODE S");
+        require(replies.read(control).code == ReplyCode::CommandOkay,
+                "MODE S could not be restored after block transfer");
 
         const Reply secondUnique = activeUpload(
             control, replies, "STOU", secondSource);
@@ -250,6 +253,10 @@ int main() {
         require(append.code == ReplyCode::TransferComplete &&
                     readText(g_pathResolver.root() / "append.txt") == "base-beta",
                 "APPE did not append atomically");
+
+        sendCommand(control, "MODE B");
+        require(replies.read(control).code == ReplyCode::CommandOkay,
+                "MODE B could not be enabled for ABOR tests");
 
         writeText(g_pathResolver.root() / "preserve.txt", "original");
         SOCKET abortUploadSocket = prepareActiveEndpoint(control, replies);

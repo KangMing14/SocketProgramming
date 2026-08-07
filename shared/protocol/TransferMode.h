@@ -1,3 +1,5 @@
 #pragma once
 
-enum class TransferMode { Binary, ASCII };
+enum class TransferType { ASCII, Binary };
+
+enum class TransferMode { Stream, Block, Compressed };

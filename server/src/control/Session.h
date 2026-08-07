@@ -22,7 +22,8 @@ enum class DataChannelMode { None, Passive, Active };
 struct ClientSession {
     SOCKET socket;
     bool authenticated = false;
-    TransferMode transferMode = TransferMode::Binary;
+    TransferType transferType = TransferType::Binary;
+    TransferMode transferMode = TransferMode::Stream;
     std::string username;
     std::filesystem::path currentDir;
 

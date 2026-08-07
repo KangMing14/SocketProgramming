@@ -58,7 +58,7 @@ void testSenderUsesStableSnapshotAndCleansIt() {
 
     MutatingTransport transport(source);
     DataChannelSession sender(transport);
-    const SendResult result = sender.sendFile(source, TransferMode::Binary);
+    const SendResult result = sender.sendFile(source, TransferType::Binary);
     assert(result.success);
     assert(result.sha256 == Sha256Hasher::hashFile(expected));
 
@@ -86,7 +86,7 @@ void testReceiveFailurePreservesDestinationAndCleansTemp() {
     transport.sentFinalFlags.push_back(false);
 
     DataChannelSession receiver(transport);
-    assert(!receiver.receiveFile(destination, TransferMode::Binary));
+    assert(!receiver.receiveFile(destination, TransferType::Binary));
     assert(filesAreIdentical(destination, expected));
     assert(hybridTempFiles(fs::current_path(), "hft") == before);
     std::cout << "[PASS] failed receive preserves destination and cleans temp\n";

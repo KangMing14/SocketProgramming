@@ -24,9 +24,11 @@ public:
                                 AbortPredicate abortRequested = {});
 
     SendResult sendFile(const std::filesystem::path& filePath,
-                        TransferMode mode = TransferMode::Binary);
+                        TransferType type = TransferType::Binary,
+                        TransferMode mode = TransferMode::Stream);
     bool receiveFile(const std::filesystem::path& destination,
-                     TransferMode mode = TransferMode::Binary);
+                     TransferType type = TransferType::Binary,
+                     TransferMode mode = TransferMode::Stream);
 
 private:
     IRdtTransport& transport;

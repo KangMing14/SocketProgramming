@@ -73,7 +73,8 @@ bool filesEqual(const fs::path& left, const fs::path& right) {
            std::vector<char>(std::istreambuf_iterator<char>(second), {});
 }
 
-bool activeStore(const fs::path& source, const fs::path& destination) {
+bool activeStore(const fs::path& source, const fs::path& destination,
+                 TransferMode transferMode = TransferMode::Stream) {
     SOCKET clientSocket = INVALID_SOCKET;
     unsigned short clientPort = 0;
     require(hybridftp::client::openActiveListenPort(clientSocket, clientPort),
@@ -94,10 +95,12 @@ bool activeStore(const fs::path& source, const fs::path& destination) {
 
     auto receive = std::async(std::launch::async, [&]() {
         DataChannelSession channel(serverReceiver);
-        return channel.receiveFile(destination, TransferMode::Binary);
+        return channel.receiveFile(destination, TransferType::Binary,
+                                   transferMode);
     });
     hybridftp::client::DataChannelSession channel(clientSender);
-    return channel.sendFile(source, TransferMode::Binary) && receive.get();
+    return channel.sendFile(source, TransferType::Binary, transferMode) &&
+           receive.get();
 }
 
 void activeHandshakeRetriesAfterDroppedSyn() {
@@ -147,10 +150,10 @@ bool passiveStore(const fs::path& source, const fs::path& destination) {
     hybridftp::client::RdtSender clientSender(clientSocket, serverAddress);
     auto receive = std::async(std::launch::async, [&]() {
         DataChannelSession channel(serverReceiver);
-        return channel.receiveFile(destination, TransferMode::Binary);
+        return channel.receiveFile(destination, TransferType::Binary);
     });
     hybridftp::client::DataChannelSession channel(clientSender);
-    return channel.sendFile(source, TransferMode::Binary) && receive.get();
+    return channel.sendFile(source, TransferType::Binary) && receive.get();
 }
 
 bool activeRetrieve(const fs::path& source, const fs::path& destination) {
@@ -165,13 +168,14 @@ bool activeRetrieve(const fs::path& source, const fs::path& destination) {
 
     auto receive = std::async(std::launch::async, [&]() {
         hybridftp::client::DataChannelSession channel(clientReceiver);
-        return channel.receiveFile(destination, TransferMode::Binary);
+        return channel.receiveFile(destination, TransferType::Binary);
     });
     DataChannelSession channel(serverSender);
-    return channel.sendFile(source, TransferMode::Binary) && receive.get();
+    return channel.sendFile(source, TransferType::Binary) && receive.get();
 }
 
-bool passiveRetrieve(const fs::path& source, const fs::path& destination) {
+bool passiveRetrieve(const fs::path& source, const fs::path& destination,
+                     TransferMode transferMode = TransferMode::Stream) {
     SOCKET serverSocket = INVALID_SOCKET;
     unsigned short serverPort = 0;
     require(openPassiveDataPort(serverSocket, serverPort),
@@ -194,10 +198,12 @@ bool passiveRetrieve(const fs::path& source, const fs::path& destination) {
 
     auto receive = std::async(std::launch::async, [&]() {
         hybridftp::client::DataChannelSession channel(clientReceiver);
-        return channel.receiveFile(destination, TransferMode::Binary);
+        return channel.receiveFile(destination, TransferType::Binary,
+                                   transferMode);
     });
     DataChannelSession channel(serverSender);
-    return channel.sendFile(source, TransferMode::Binary) && receive.get();
+    return channel.sendFile(source, TransferType::Binary, transferMode) &&
+           receive.get();
 }
 
 } // namespace
@@ -237,6 +243,22 @@ int main() {
         require(filesEqual(source, passiveRetrieveResult),
                 "PASV RETR integrity mismatch");
         std::cout << "[PASS] PASV RETR\n";
+
+        const fs::path blockStoreResult = testDirectory / "block_active_store.bin";
+        require(activeStore(source, blockStoreResult, TransferMode::Block),
+                "MODE B PORT STOR failed");
+        require(filesEqual(source, blockStoreResult),
+                "MODE B PORT STOR integrity mismatch");
+        std::cout << "[PASS] MODE B PORT STOR\n";
+
+        const fs::path blockRetrieveResult =
+            testDirectory / "block_passive_retr.bin";
+        require(passiveRetrieve(source, blockRetrieveResult,
+                                TransferMode::Block),
+                "MODE B PASV RETR failed");
+        require(filesEqual(source, blockRetrieveResult),
+                "MODE B PASV RETR integrity mismatch");
+        std::cout << "[PASS] MODE B PASV RETR\n";
 
         const fs::path empty = testDirectory / "empty.bin";
         writeFixture(empty, 0);

@@ -40,7 +40,7 @@ void testClientSenderUsesSnapshotHash() {
     MutatingTransport transport(source);
     hybridftp::client::DataChannelSession session(transport);
     const hybridftp::client::SendResult result =
-        session.sendFile(source, TransferMode::Binary);
+        session.sendFile(source, TransferType::Binary);
 
     assert(result.success);
     assert(result.sha256 == Sha256Hasher::hashFile(expected));
@@ -58,7 +58,7 @@ void testClientReceiveFailurePreservesDestination() {
     transport.sentFinalFlags.push_back(false);
 
     hybridftp::client::DataChannelSession session(transport);
-    assert(!session.receiveFile(destination, TransferMode::Binary));
+    assert(!session.receiveFile(destination, TransferType::Binary));
     assert(filesAreIdentical(destination, expected));
     std::cout << "[PASS] client failed receive preserves destination\n";
 }

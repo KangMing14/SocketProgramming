@@ -173,7 +173,7 @@ int main() {
         require(sender.waitForServerReady(loopback),
                 "Client did not receive server SYN");
         hybridftp::client::DataChannelSession channel(sender);
-        require(channel.sendFile(source, TransferMode::Binary),
+        require(channel.sendFile(source, TransferType::Binary),
                 "Client upload failed");
         require(replies.readCode(clientControl) == ReplyCode::TransferComplete,
                 "Expected 226 after Active STOR");
