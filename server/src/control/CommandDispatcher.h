@@ -3,6 +3,7 @@
 #include "../common/ClientRegistry.h"
 #include "../common/Logger.h"
 #include "../common/ReplyCodes.h"
+#include "../common/TimeFormat.h"
 #include "CommandParser.h"
 #include "Session.h"
 
