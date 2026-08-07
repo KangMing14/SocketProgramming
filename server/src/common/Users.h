@@ -4,6 +4,7 @@
 
 namespace Users {
     const std::unordered_map<std::string, std::string> database = {
-        {"user", "password"}
+        {"User1", "password"},
+        {"User2", "hcmus"}
     };
 }
