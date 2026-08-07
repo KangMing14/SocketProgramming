@@ -8,6 +8,7 @@ add_library(ftp_protocol STATIC
     shared/protocol/RdtHeader.cpp
     shared/protocol/CheckSum.cpp
     shared/protocol/BlockMode.cpp
+    shared/protocol/CompressedMode.cpp
 )
 target_include_directories(ftp_protocol PUBLIC shared/protocol)
 
@@ -106,6 +107,7 @@ add_server_test(test_rdt_congestion tests/test_rdt_congestion.cpp)
 add_server_test(test_ascii_translator tests/test_ascii_translator.cpp)
 add_server_test(test_temp_transfer tests/test_temp_transfer.cpp)
 add_server_test(test_block_mode tests/test_block_mode.cpp)
+add_server_test(test_compressed_mode tests/test_compressed_mode.cpp)
 
 add_executable(test_transfer_matrix tests/test_transfer_matrix.cpp)
 target_link_libraries(test_transfer_matrix PRIVATE ftp_server_core ftp_client_core)

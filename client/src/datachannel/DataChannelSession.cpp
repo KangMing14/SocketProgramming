@@ -1,6 +1,7 @@
 #include "DataChannelSession.h"
 
 #include "BlockMode.h"
+#include "CompressedMode.h"
 #include "AsciiChunkedReader.h"
 #include "AsciiTranslator.h"
 #include "ChunkedFileReader.h"
@@ -146,35 +147,72 @@ bool sendBlockFromReader(
     }
     return !aborted() && transport.flush() && !aborted();
 }
+
+template <typename Reader>
+bool sendCompressedFromReader(
+    Reader& reader, TransferType type, IRdtTransport& transport,
+    const DataChannelSession::AbortPredicate& abortRequested) {
+    const auto aborted = [&] { return abortRequested && abortRequested(); };
+    if (!reader.isOpen() || aborted()) return false;
+
+    CompressedEncoder encoder(type);
+    std::uint32_t sequence = 0;
+    std::vector<char> input;
+    while (reader.nextChunk(input)) {
+        if (aborted()) return false;
+        std::vector<char> encoded;
+        if (!encoder.appendData(input, encoded) ||
+            !sendPayload(encoded, false, sequence, transport,
+                         abortRequested)) return false;
+        input.clear();
+    }
+
+    std::vector<char> eof;
+    if (!encoder.appendEndOfFile(eof) ||
+        !sendPayload(eof, true, sequence, transport, abortRequested)) {
+        return false;
+    }
+    return !aborted() && transport.flush() && !aborted();
+}
 }
 
 SendResult DataChannelSession::sendFile(const std::filesystem::path& filePath,
                                         TransferType type,
                                         TransferMode mode) {
     SendResult result;
-    if (mode == TransferMode::Compressed) return result;
     SourceSnapshot snapshot(filePath);
     if (!snapshot.isValid()) return result;
 
     if (type == TransferType::ASCII) {
         AsciiChunkedReader reader(snapshot.path());
-        result.success = mode == TransferMode::Block
-            ? sendBlockFromReader(reader, transport, abortRequested)
-            : sendFromReader(reader, transport, abortRequested);
+        if (mode == TransferMode::Block) {
+            result.success = sendBlockFromReader(reader, transport,
+                                                 abortRequested);
+        } else if (mode == TransferMode::Compressed) {
+            result.success = sendCompressedFromReader(
+                reader, type, transport, abortRequested);
+        } else {
+            result.success = sendFromReader(reader, transport, abortRequested);
+        }
         return result;
     }
     result.sha256 = Sha256Hasher::hashFile(snapshot.path());
     if (result.sha256.empty()) return result;
     ChunkedFileReader reader(snapshot.path());
-    result.success = mode == TransferMode::Block
-        ? sendBlockFromReader(reader, transport, abortRequested)
-        : sendFromReader(reader, transport, abortRequested);
+    if (mode == TransferMode::Block) {
+        result.success = sendBlockFromReader(reader, transport,
+                                             abortRequested);
+    } else if (mode == TransferMode::Compressed) {
+        result.success = sendCompressedFromReader(
+            reader, type, transport, abortRequested);
+    } else {
+        result.success = sendFromReader(reader, transport, abortRequested);
+    }
     return result;
 }
 
 bool DataChannelSession::receiveFile(const std::filesystem::path& destination,
                                      TransferType type, TransferMode mode) {
-    if (mode == TransferMode::Compressed) return false;
     ChunkedFileWriter writer(destination);
     if (!writer.isValid()) return false;
 
@@ -194,6 +232,39 @@ bool DataChannelSession::receiveFile(const std::filesystem::path& destination,
             bool endOfFile = false;
             bool endOfRecord = false;
             while (decoder.nextRecord(data, endOfFile, endOfRecord)) {
+                if (isAborted()) return false;
+                if (type == TransferType::ASCII) data = translator.decode(data);
+                if (!data.empty() &&
+                    !writer.appendChunk(writeSequence++, data)) return false;
+                if (endOfFile) break;
+            }
+            if (!decoder.isValid()) return false;
+            if (decoder.sawEndOfFile() && !isFinal) return false;
+            if (isFinal) {
+                if (!decoder.finish()) return false;
+                break;
+            }
+        }
+        return !isAborted() && writer.commit();
+    }
+
+    if (mode == TransferMode::Compressed) {
+        CompressedDecoder decoder(type);
+        std::uint32_t writeSequence = 0;
+        while (true) {
+            std::uint32_t transportSequence = 0;
+            std::vector<char> payload;
+            bool isFinal = false;
+            if (isAborted() ||
+                !transport.receiveNext(transportSequence, payload, isFinal) ||
+                isAborted() || !decoder.appendPayload(payload)) return false;
+
+            std::vector<char> data;
+            bool endOfFile = false;
+            bool endOfRecord = false;
+            bool suspectedError = false;
+            while (decoder.nextData(data, endOfFile, endOfRecord,
+                                    suspectedError)) {
                 if (isAborted()) return false;
                 if (type == TransferType::ASCII) data = translator.decode(data);
                 if (!data.empty() &&

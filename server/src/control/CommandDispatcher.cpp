@@ -390,7 +390,7 @@ namespace CommandDispatcher{
         },
         { "MODE",
             "Syntax: MODE {S | B | C}\n"
-            "Set the transfer mode. S = Stream, B = FTP Block; C is not supported."
+            "Set the transfer mode. S = Stream, B = FTP Block, C = FTP Compressed."
         },
         { "PORT", 
             "Syntax: PORT <h1,h2,h3,h4,p1,p2>\n"
@@ -740,17 +740,17 @@ namespace CommandDispatcher{
                                        "MODE must be S, B, or C.");
                 return;
             }
-            if (args[0] == "C") {
-                Session::replyWithCode(
-                    s.socket, ReplyCode::CommandNotImplementedForParameter,
-                    "MODE C is not supported.");
-                return;
+            if (args[0] == "B") {
+                s.transferMode = TransferMode::Block;
+            } else if (args[0] == "C") {
+                s.transferMode = TransferMode::Compressed;
+            } else {
+                s.transferMode = TransferMode::Stream;
             }
-            s.transferMode = args[0] == "B"
-                ? TransferMode::Block : TransferMode::Stream;
             Session::replyWithCode(s.socket, ReplyCode::CommandOkay,
                 args[0] == "B" ? "Block mode enabled."
-                               : "Stream mode enabled.");
+                : args[0] == "C" ? "Compressed mode enabled."
+                                  : "Stream mode enabled.");
         } },
 
         { "ABOR", [](ClientSession& s, const std::vector<std::string>& args) {

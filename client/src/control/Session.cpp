@@ -444,6 +444,7 @@ bool forwardCommand(SOCKET controlSocket, ClientState& state,
         const std::string mode = upper(tokens[1]);
         if (mode == "S") state.transferMode = TransferMode::Stream;
         if (mode == "B") state.transferMode = TransferMode::Block;
+        if (mode == "C") state.transferMode = TransferMode::Compressed;
     }
     return true;
 }

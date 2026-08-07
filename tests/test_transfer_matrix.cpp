@@ -260,6 +260,24 @@ int main() {
                 "MODE B PASV RETR integrity mismatch");
         std::cout << "[PASS] MODE B PASV RETR\n";
 
+        const fs::path compressedStoreResult =
+            testDirectory / "compressed_active_store.bin";
+        require(activeStore(source, compressedStoreResult,
+                            TransferMode::Compressed),
+                "MODE C PORT STOR failed");
+        require(filesEqual(source, compressedStoreResult),
+                "MODE C PORT STOR integrity mismatch");
+        std::cout << "[PASS] MODE C PORT STOR\n";
+
+        const fs::path compressedRetrieveResult =
+            testDirectory / "compressed_passive_retr.bin";
+        require(passiveRetrieve(source, compressedRetrieveResult,
+                                TransferMode::Compressed),
+                "MODE C PASV RETR failed");
+        require(filesEqual(source, compressedRetrieveResult),
+                "MODE C PASV RETR integrity mismatch");
+        std::cout << "[PASS] MODE C PASV RETR\n";
+
         const fs::path empty = testDirectory / "empty.bin";
         writeFixture(empty, 0);
         const fs::path emptyResult = testDirectory / "empty_result.bin";

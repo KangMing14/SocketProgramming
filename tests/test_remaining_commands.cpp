@@ -209,9 +209,8 @@ int main() {
         require(replies.read(control).code == ReplyCode::CommandOkay,
                 "MODE B was not accepted");
         sendCommand(control, "MODE C");
-        require(replies.read(control).code ==
-                    ReplyCode::CommandNotImplementedForParameter,
-                "MODE C was not rejected with 504");
+        require(replies.read(control).code == ReplyCode::CommandOkay,
+                "MODE C was not accepted");
         sendCommand(control, "LIST subdir");
         Reply listing = replies.read(control);
         require(listing.code == ReplyCode::ActionCompleted &&
@@ -225,7 +224,7 @@ int main() {
                 "NLST path listing was not name-only");
 
         const Reply firstUnique = activeUpload(
-            control, replies, "STOU", firstSource, TransferMode::Block);
+            control, replies, "STOU", firstSource, TransferMode::Compressed);
         require(firstUnique.code == ReplyCode::TransferComplete,
                 "First STOU did not complete");
         const std::string firstName = extractFilename(firstUnique.line);
@@ -235,7 +234,7 @@ int main() {
 
         sendCommand(control, "MODE S");
         require(replies.read(control).code == ReplyCode::CommandOkay,
-                "MODE S could not be restored after block transfer");
+                "MODE S could not be restored after compressed transfer");
 
         const Reply secondUnique = activeUpload(
             control, replies, "STOU", secondSource);
@@ -254,9 +253,9 @@ int main() {
                     readText(g_pathResolver.root() / "append.txt") == "base-beta",
                 "APPE did not append atomically");
 
-        sendCommand(control, "MODE B");
+        sendCommand(control, "MODE C");
         require(replies.read(control).code == ReplyCode::CommandOkay,
-                "MODE B could not be enabled for ABOR tests");
+                "MODE C could not be enabled for ABOR tests");
 
         writeText(g_pathResolver.root() / "preserve.txt", "original");
         SOCKET abortUploadSocket = prepareActiveEndpoint(control, replies);

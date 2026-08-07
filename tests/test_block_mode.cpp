@@ -258,27 +258,6 @@ void testFailureAndAbortPreserveDestination(const fs::path& directory) {
             "Cancelled block transfer replaced the destination");
 }
 
-void testCompressedModeRemainsUnsupported(const fs::path& directory) {
-    const fs::path source = directory / "compressed-source.bin";
-    const fs::path destination = directory / "compressed-destination.bin";
-    writeFile(source, bytes("data"));
-    writeFile(destination, bytes("original"));
-
-    MemoryTransport transport;
-    DataChannelSession sender(transport);
-    require(!sender.sendFile(source, TransferType::Binary,
-                             TransferMode::Compressed),
-            "Compressed sender silently used another mode");
-    require(transport.payloads.empty(),
-            "Unsupported compressed mode sent data");
-
-    DataChannelSession receiver(transport);
-    require(!receiver.receiveFile(destination, TransferType::Binary,
-                                  TransferMode::Compressed),
-            "Compressed receiver silently used another mode");
-    require(asString(readFile(destination)) == "original",
-            "Unsupported compressed mode changed the destination");
-}
 }
 
 int main() {
@@ -295,7 +274,6 @@ int main() {
         testDataChannelRoundTrip(directory);
         testAsciiBeforeBlockEncoding(directory);
         testFailureAndAbortPreserveDestination(directory);
-        testCompressedModeRemainsUnsupported(directory);
 
         fs::remove_all(directory);
         std::cout << "[PASS] FTP MODE B framing and data-channel tests\n";
