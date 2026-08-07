@@ -112,7 +112,7 @@ DirectoryService::Result DirectoryService::deleteFile(const fs::path& currentDir
 	if (!getMetadata(currentDir, name, meta))
 		return { false, ReplyCode::ActionNotTaken, "File not found" };
 	if (meta.isDirectory)
-		return { false, ReplyCode::ActionNotTaken, "RCannot DELE a directory; use RMD" };
+		return { false, ReplyCode::ActionNotTaken, "Cannot DELE a directory; use RMD" };
 
 	std::filesystem::path resolved;
 	resolver.resolve(currentDir, name, resolved);
