@@ -272,7 +272,7 @@ bool storeFile(SOCKET controlSocket, ClientState& state,
     }
     if (state.dataMode == DataMode::None ||
         state.pendingDataSocket == INVALID_SOCKET) {
-        std::cerr << "Use PORT or PASV before STOR.\n";
+        std::cerr << "Use PORT or PASV before " << verb << ".\n";
         return true;
     }
 
