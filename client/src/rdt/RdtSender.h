@@ -12,13 +12,13 @@ namespace hybridftp::client {
 class RdtSender : public IRdtTransport
 {
 private:
-  SOCKET udpSocket;
-  sockaddr_in destAddr;
-  int timeoutMs;
+  SOCKET udpSocket = INVALID_SOCKET;
+  sockaddr_in destAddr{};
+  int timeoutMs = 500;
   std::function<bool()> abortPredicate;
 
   // Helper to physically send the packet
-  void sendRawPacket(const RdtPacket &packet);
+  bool sendRawPacket(const RdtPacket &packet);
 
   // Helper to wait for the ACK
   bool waitForAck(uint32_t expected_ack_num);

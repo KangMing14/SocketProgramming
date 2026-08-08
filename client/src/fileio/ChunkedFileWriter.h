@@ -3,6 +3,7 @@
 #include <fstream>
 #include <filesystem>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -18,9 +19,12 @@ public:
     ChunkedFileWriter& operator=(const ChunkedFileWriter&) = delete;
 
     bool isValid() const;
+    static bool validateDestination(const fs::path& filePath,
+                                    std::string& failureReason);
     bool appendChunk(uint32_t seqNum, const std::vector<char>& data);
     bool commit();
     void abort();
+    const std::string& errorMessage() const { return failureReason; }
 
 private:
     fs::path destinationPath;
@@ -29,6 +33,7 @@ private:
     uint32_t nextExpectedSequence = 0;
     bool committed = false;
     bool valid = false;
+    std::string failureReason;
 };
 
 }

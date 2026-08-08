@@ -3,6 +3,7 @@
 #include <cstddef>
 
 constexpr std::size_t MAX_PAYLOAD = 1024;
+constexpr std::size_t RDT_RECEIVE_WINDOW = 10;
 constexpr int HANDSHAKE_TIMEOUT_MS = 500;
 constexpr int HANDSHAKE_MAX_RETRIES = 10;
 constexpr int DATA_IDLE_TIMEOUT_MS = 5000;

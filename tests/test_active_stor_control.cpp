@@ -134,7 +134,7 @@ int main() {
         require(replies.readCode(clientControl) == ReplyCode::ServiceReady,
                 "Expected 220 greeting");
 
-        sendCommand(clientControl, "USER user");
+        sendCommand(clientControl, "USER User1");
         require(replies.readCode(clientControl) == ReplyCode::AuthNeedPass,
                 "Expected 331 after USER");
         sendCommand(clientControl, "PASS password");

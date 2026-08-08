@@ -12,6 +12,9 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -72,6 +75,44 @@ bool filesEqual(const fs::path& left, const fs::path& right) {
     return std::vector<char>(std::istreambuf_iterator<char>(first), {}) ==
            std::vector<char>(std::istreambuf_iterator<char>(second), {});
 }
+
+class LockBeforeCommitTransport : public IRdtTransport {
+public:
+    LockBeforeCommitTransport(hybridftp::client::RdtReceiver& receiverRef,
+                              fs::path destinationPath)
+        : receiver(receiverRef),
+          destination(fs::absolute(std::move(destinationPath))) {}
+
+    ~LockBeforeCommitTransport() override {
+        if (destinationLock != INVALID_HANDLE_VALUE) {
+            CloseHandle(destinationLock);
+        }
+    }
+
+    bool sendChunk(std::uint32_t, const char*, std::size_t, bool) override {
+        return false;
+    }
+
+    bool receiveNext(std::uint32_t& sequence, std::vector<char>& data,
+                     bool& isFinal) override {
+        if (!receiver.receiveNext(sequence, data, isFinal)) return false;
+        if (isFinal && destinationLock == INVALID_HANDLE_VALUE) {
+            destinationLock = CreateFileW(
+                destination.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        }
+        return !isFinal || destinationLock != INVALID_HANDLE_VALUE;
+    }
+
+    bool confirmReceive(std::uint32_t sequence, bool accepted) override {
+        return receiver.confirmReceive(sequence, accepted);
+    }
+
+private:
+    hybridftp::client::RdtReceiver& receiver;
+    fs::path destination;
+    HANDLE destinationLock = INVALID_HANDLE_VALUE;
+};
 
 bool activeStore(const fs::path& source, const fs::path& destination) {
     SOCKET clientSocket = INVALID_SOCKET;
@@ -171,6 +212,38 @@ bool activeRetrieve(const fs::path& source, const fs::path& destination) {
     return channel.sendFile(source, TransferMode::Binary) && receive.get();
 }
 
+bool activeRetrieveRejectsFailedCommit(const fs::path& source,
+                                       const fs::path& destination,
+                                       const fs::path& expected) {
+    writeFixture(destination, 73);
+    fs::copy_file(destination, expected, fs::copy_options::overwrite_existing);
+
+    SOCKET clientSocket = INVALID_SOCKET;
+    unsigned short clientPort = 0;
+    require(hybridftp::client::openActiveListenPort(clientSocket, clientPort),
+            "Could not open commit-failure client socket");
+
+    hybridftp::client::RdtReceiver clientReceiver(clientSocket);
+    clientReceiver.expectPeerIp(loopbackIp());
+    LockBeforeCommitTransport transport(clientReceiver, destination);
+    RdtSender serverSender("127.0.0.1", clientPort);
+    std::string failureReason;
+
+    auto receive = std::async(std::launch::async, [&]() {
+        hybridftp::client::DataChannelSession channel(transport);
+        return channel.receiveFile(
+            destination, TransferMode::Binary, &failureReason);
+    });
+    DataChannelSession channel(serverSender);
+    const SendResult sendResult = channel.sendFile(source, TransferMode::Binary);
+    const bool receiveResult = receive.get();
+
+    return !sendResult.success && !receiveResult &&
+           failureReason.find("Could not replace the local destination") !=
+               std::string::npos &&
+           filesEqual(destination, expected);
+}
+
 bool passiveRetrieve(const fs::path& source, const fs::path& destination) {
     SOCKET serverSocket = INVALID_SOCKET;
     unsigned short serverPort = 0;
@@ -237,6 +310,15 @@ int main() {
         require(filesEqual(source, passiveRetrieveResult),
                 "PASV RETR integrity mismatch");
         std::cout << "[PASS] PASV RETR\n";
+
+        const fs::path failedCommitResult =
+            testDirectory / "failed_commit_retr.bin";
+        const fs::path failedCommitExpected =
+            testDirectory / "failed_commit_expected.bin";
+        require(activeRetrieveRejectsFailedCommit(
+                    source, failedCommitResult, failedCommitExpected),
+                "PORT RETR accepted a failed local commit");
+        std::cout << "[PASS] RETR rejects failed local commit\n";
 
         const fs::path empty = testDirectory / "empty.bin";
         writeFixture(empty, 0);

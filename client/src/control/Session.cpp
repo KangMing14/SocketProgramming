@@ -1,6 +1,7 @@
 #include "Session.h"
 
 #include "ActiveModeClient.h"
+#include "ChunkedFileWriter.h"
 #include "DataChannelSession.h"
 #include "PassiveModeClient.h"
 #include "RdtReceiver.h"
@@ -113,7 +114,7 @@ bool readReply(SOCKET socket, ClientState& state, Reply& reply) {
         char buffer[512];
         const int received = recv(socket, buffer, sizeof(buffer), 0);
         if (received <= 0) return false;
-        state.replyBuffer.append(buffer, received);
+        state.replyBuffer.append(buffer, static_cast<std::size_t>(received));
     }
 
     return true;
@@ -127,6 +128,12 @@ bool printReply(SOCKET socket, ClientState& state, Reply& reply) {
     }
     
     return true;
+}
+
+void printStoredReply(const Reply& reply) {
+    for (const std::string& line : reply.lines)  {
+        std::cout << line << '\n';
+    }
 }
 
 std::vector<std::string> splitCommand(const std::string& command) {
@@ -143,15 +150,36 @@ std::string upper(std::string value) {
     return value;
 }
 
-bool extractHash(const std::string& replyLine, std::string& outHash) {
-    const std::string marker = "SHA256=";
-    size_t pos = replyLine.find(marker);
-    if (pos == std::string::npos) return false;
-    outHash = replyLine.substr(pos + marker.size());
-    while (!outHash.empty() && !std::isxdigit(static_cast<unsigned char>(outHash.back()))) {
-        outHash.pop_back();
+std::string canonicalizeCommandVerb(std::string command) {
+    const std::size_t first = command.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return command;
+    const std::size_t end = command.find_first_of(" \t\r\n", first);
+    const std::size_t length = end == std::string::npos
+        ? command.size() - first : end - first;
+    std::transform(command.begin() + static_cast<std::ptrdiff_t>(first),
+                   command.begin() + static_cast<std::ptrdiff_t>(first + length),
+                   command.begin() + static_cast<std::ptrdiff_t>(first),
+                   [](unsigned char ch) {
+                       return static_cast<char>(std::toupper(ch));
+                   });
+    return command;
+}
+
+bool extractHashField(const std::string& replyLine,
+                      const std::string& field,
+                      std::string& outHash) {
+    std::istringstream tokens(replyLine);
+    std::string token;
+    const std::string prefix = field + "=";
+    while (tokens >> token) {
+        if (token.rfind(prefix, 0) != 0) continue;
+        outHash = token.substr(prefix.size());
+        return outHash.size() == 64 &&
+            std::all_of(outHash.begin(), outHash.end(), [](unsigned char ch) {
+                return std::isxdigit(ch) != 0;
+            });
     }
-    return outHash.size() == 64;
+    return false;
 }
 
 bool enterActiveMode(SOCKET controlSocket, ClientState& state,
@@ -244,7 +272,7 @@ bool storeFile(SOCKET controlSocket, ClientState& state,
     }
     if (state.dataMode == DataMode::None ||
         state.pendingDataSocket == INVALID_SOCKET) {
-        std::cerr << "Use PORT or PASV before STOR.\n";
+        std::cerr << "Use PORT or PASV before " << verb << ".\n";
         return true;
     }
 
@@ -279,7 +307,7 @@ bool storeFile(SOCKET controlSocket, ClientState& state,
     try {
         state.transferWorker = std::thread(
             [controlSocket, &state, localPath, mode, dataSocket,
-             passiveAddress, serverAddress, transferMode]() {
+             passiveAddress, serverAddress, transferMode, verb]() {
                 const auto aborted = [&state] {
                     return state.abortRequested.load();
                 };
@@ -310,7 +338,7 @@ bool storeFile(SOCKET controlSocket, ClientState& state,
                            transferMode == TransferMode::Binary &&
                            !sendResult.sha256.empty()) {
                     std::string serverHash;
-                    if (extractHash(completion.line, serverHash)) {
+                    if (extractHashField(completion.line, "SHA256", serverHash)) {
                         if (serverHash == sendResult.sha256) {
                             std::cout << "Integrity verified: SHA-256 matches ("
                                       << serverHash << ")\n";
@@ -318,6 +346,14 @@ bool storeFile(SOCKET controlSocket, ClientState& state,
                             std::cerr << "WARNING: hash mismatch! Local="
                                       << sendResult.sha256 << " Server="
                                       << serverHash << "\n";
+                        }
+                    }
+                    if (verb == "APPE") {
+                        std::string finalHash;
+                        if (extractHashField(
+                                completion.line, "FINAL_SHA256", finalHash)) {
+                            std::cout << "Final remote SHA-256: "
+                                      << finalHash << "\n";
                         }
                     }
                 }
@@ -344,11 +380,25 @@ bool retrieveFile(SOCKET controlSocket, ClientState& state,
     }
 
     const std::string remotePath = tokens[1];
-    const std::filesystem::path localPath = tokens.size() == 3
+    std::filesystem::path localPath = tokens.size() == 3
         ? std::filesystem::path(tokens[2])
         : std::filesystem::path(remotePath).filename();
+    if (tokens.size() == 3) {
+        std::error_code directoryError;
+        if (std::filesystem::is_directory(localPath, directoryError) &&
+            !directoryError) {
+            localPath /= std::filesystem::path(remotePath).filename();
+        }
+    }
     if (localPath.empty()) {
         std::cerr << "A local filename is required.\n";
+        return true;
+    }
+    std::string destinationFailure;
+    if (!hybridftp::client::ChunkedFileWriter::validateDestination(
+            localPath, destinationFailure)) {
+        std::cerr << "Cannot download to \"" << localPath.string()
+                  << "\": " << destinationFailure << '\n';
         return true;
     }
     if (!sendCommand(controlSocket, "RETR " + remotePath)) return false;
@@ -387,19 +437,41 @@ bool retrieveFile(SOCKET controlSocket, ClientState& state,
                     ready = receiver.signalClientReady(passiveAddress);
                 }
                 hybridftp::client::DataChannelSession channel(receiver, aborted);
+                std::string failureReason;
                 const bool transferOkay = ready && !aborted() &&
-                    channel.receiveFile(localPath, transferMode);
+                    channel.receiveFile(localPath, transferMode, &failureReason);
 
                 Reply completion;
-                const bool replyOkay = printReply(controlSocket, state, completion);
-                if (replyOkay && !aborted() &&
-                    (!transferOkay ||
-                     completion.code != ReplyCode::TransferComplete)) {
-                    std::cerr << "Download failed.\n";
+                const bool replyOkay = readReply(controlSocket, state, completion);
+                if (!replyOkay && !aborted()) {
+                    std::cerr << "Download failed for \"" << localPath.string()
+                              << "\": the final server reply was not received.\n";
                 } else if (replyOkay && !aborted() &&
-                           transferMode == TransferMode::Binary) {
+                           (!transferOkay ||
+                            completion.code != ReplyCode::TransferComplete)) {
+                    if (completion.code != ReplyCode::TransferComplete) {
+                        printStoredReply(completion);
+                    }
+                    std::cerr << "Download failed for \"" << localPath.string()
+                              << "\"";
+                    if (!failureReason.empty()) {
+                        std::cerr << ": " << failureReason;
+                    }
+                    if (completion.code == ReplyCode::TransferComplete) {
+                        std::cerr << (failureReason.empty() ? ": " : " ")
+                                  << "The server sent all data, but the local "
+                                     "file was not committed.";
+                    }
+                    std::cerr << '\n';
+                } else if (replyOkay && !aborted()) {
+                    printStoredReply(completion);
+                }
+
+                if (replyOkay && transferOkay && !aborted() &&
+                    completion.code == ReplyCode::TransferComplete &&
+                    transferMode == TransferMode::Binary) {
                     std::string serverHash;
-                    if (extractHash(completion.line, serverHash)) {
+                    if (extractHashField(completion.line, "SHA256", serverHash)) {
                         const std::string localHash =
                             Sha256Hasher::hashFile(localPath);
                         if (localHash == serverHash) {
@@ -425,7 +497,7 @@ bool retrieveFile(SOCKET controlSocket, ClientState& state,
 bool forwardCommand(SOCKET controlSocket, ClientState& state,
                     const std::string& command,
                     const std::vector<std::string>& tokens) {
-    if (!sendCommand(controlSocket, command)) return false;
+    if (!sendCommand(controlSocket, canonicalizeCommandVerb(command))) return false;
     Reply reply;
     if (!printReply(controlSocket, state, reply)) return false;
 

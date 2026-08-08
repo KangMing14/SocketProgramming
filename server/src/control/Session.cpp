@@ -7,12 +7,37 @@
 #include "Globals.h"
 #include <winsock2.h>
 #include <sstream>
+#include <vector>
+
+namespace {
+bool sendAll(SOCKET socket, const std::string& bytes) {
+    std::size_t sentTotal = 0;
+    while (sentTotal < bytes.size()) {
+        const int sent = send(
+            socket, bytes.data() + sentTotal,
+            static_cast<int>(bytes.size() - sentTotal), 0);
+        if (sent > 0) {
+            sentTotal += static_cast<std::size_t>(sent);
+            continue;
+        }
+        if (sent == SOCKET_ERROR && WSAGetLastError() == WSAEINTR) continue;
+        return false;
+    }
+    return true;
+}
+
+void stopFailedControlSocket(SOCKET socket) {
+    Logger::log("Control-channel send failed: " +
+                std::to_string(WSAGetLastError()) + ".");
+    shutdown(socket, SD_BOTH);
+}
+}
 
 namespace Session {
     void replyWithCode(SOCKET clientSocket, int replyCode, std::string message = ""){
         // Respond to the client with the reply code
         std::string response = std::to_string(replyCode) + " " + message + "\r\n";
-        send(clientSocket, response.c_str(), (int) response.length(), 0);
+        if (!sendAll(clientSocket, response)) stopFailedControlSocket(clientSocket);
     }
 
     void multilineReplyWithCode(SOCKET clientSocket, int replyCode, std::string message = ""){
@@ -26,16 +51,21 @@ namespace Session {
             lines.push_back(line);
         }
 
-        for (size_t i = 0; i < lines.size() - 1; ++i) {
+        if (lines.empty()) lines.emplace_back();
+
+        for (size_t i = 0; i + 1 < lines.size(); ++i) {
             response = std::to_string(replyCode) + "-" + lines[i] + "\r\n";
-            send(clientSocket, response.c_str(), (int) response.length(), 0);
+            if (!sendAll(clientSocket, response)) {
+                stopFailedControlSocket(clientSocket);
+                return;
+            }
         }
 
         response = std::to_string(replyCode) + " " + lines[lines.size()-1] + "\r\n";
-        send(clientSocket, response.c_str(), (int) response.length(), 0);
+        if (!sendAll(clientSocket, response)) stopFailedControlSocket(clientSocket);
     }
 
-    SOCKET initializeSession(){
+    SOCKET initializeSession(std::uint16_t port){
         // Every Winsock program must call this once before using any socket function.
         WSADATA wsaData;
         if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
@@ -54,12 +84,33 @@ namespace Session {
         sockaddr_in serverAddr{};
         serverAddr.sin_family = AF_INET;
         serverAddr.sin_addr.s_addr = INADDR_ANY;   // listen on all local interfaces
-        serverAddr.sin_port = htons(4567);         // control channel port
+        serverAddr.sin_port = htons(port);          // control channel port
 
-        bind(listenSock, (sockaddr*)&serverAddr, sizeof(serverAddr));
-        listen(listenSock, SOMAXCONN);
+        if (bind(listenSock, reinterpret_cast<sockaddr*>(&serverAddr),
+                 sizeof(serverAddr)) == SOCKET_ERROR) {
+            std::cout << "bind() failed: " << WSAGetLastError() << "\n";
+            closesocket(listenSock);
+            WSACleanup();
+            return INVALID_SOCKET;
+        }
+        if (listen(listenSock, SOMAXCONN) == SOCKET_ERROR) {
+            std::cout << "listen() failed: " << WSAGetLastError() << "\n";
+            closesocket(listenSock);
+            WSACleanup();
+            return INVALID_SOCKET;
+        }
 
-        std::cout << "Server listening on port 4567...\n";
+        std::uint16_t listeningPort = port;
+        if (listeningPort == 0) {
+            sockaddr_in boundAddress{};
+            int boundLength = sizeof(boundAddress);
+            if (getsockname(listenSock,
+                    reinterpret_cast<sockaddr*>(&boundAddress),
+                    &boundLength) == 0) {
+                listeningPort = ntohs(boundAddress.sin_port);
+            }
+        }
+        std::cout << "Server listening on port " << listeningPort << "...\n";
         return listenSock;
     }
 

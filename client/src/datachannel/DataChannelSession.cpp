@@ -114,24 +114,48 @@ SendResult DataChannelSession::sendFile(const std::filesystem::path& filePath,
 }
 
 bool DataChannelSession::receiveFile(const std::filesystem::path& destination,
-                                     TransferMode mode) {
+                                     TransferMode mode,
+                                     std::string* failureReason) {
+    if (failureReason != nullptr) failureReason->clear();
+    const auto fail = [&](const std::string& reason) {
+        if (failureReason != nullptr) *failureReason = reason;
+        return false;
+    };
+
     ChunkedFileWriter writer(destination);
-    if (!writer.isValid()) return false;
+    if (!writer.isValid()) return fail(writer.errorMessage());
 
     AsciiTranslator translator;
     while (true) {
         std::uint32_t sequence = 0;
         std::vector<char> data;
         bool isFinal = false;
-        if (isAborted() ||
-            !transport.receiveNext(sequence, data, isFinal) ||
-            isAborted()) return false;
+        if (isAborted()) return fail("Download was aborted.");
+        if (!transport.receiveNext(sequence, data, isFinal)) {
+            return fail("The data connection closed or timed out before the final packet.");
+        }
+        if (isAborted()) {
+            transport.confirmReceive(sequence, false);
+            return fail("Download was aborted.");
+        }
         if (mode == TransferMode::ASCII) data = translator.decode(data);
-        if (!writer.appendChunk(sequence, data)) return false;
-        if (isFinal) break;
-    }
+        if (!writer.appendChunk(sequence, data)) {
+            transport.confirmReceive(sequence, false);
+            return fail(writer.errorMessage());
+        }
+        if (!isFinal) continue;
 
-    return !isAborted() && writer.commit();
+        const bool committed = !isAborted() && writer.commit();
+        const bool confirmed = transport.confirmReceive(sequence, committed);
+        if (!committed) {
+            return fail(isAborted() ? "Download was aborted."
+                                    : writer.errorMessage());
+        }
+        if (!confirmed) {
+            return fail("The file was saved, but the final acknowledgement could not be sent.");
+        }
+        return true;
+    }
 }
 
 }

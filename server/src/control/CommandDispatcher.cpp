@@ -8,7 +8,9 @@
 #include "RdtReceiver.h"
 #include "RdtSender.h"
 #include "Sha256Hasher.h"
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <fstream>
 #include <iomanip>
 #include <memory>
@@ -59,7 +61,8 @@ bool createSiblingTemporaryPath(const std::filesystem::path& destination,
 }
 
 bool appendAtomically(const std::filesystem::path& destination,
-                      const std::filesystem::path& incoming) {
+                      const std::filesystem::path& incoming,
+                      std::string* finalHash) {
     std::filesystem::path combined;
     if (!createSiblingTemporaryPath(destination, L"hfa", combined)) return false;
 
@@ -97,6 +100,11 @@ bool appendAtomically(const std::filesystem::path& destination,
     if (!output.good()) return false;
     output.close();
     if (output.fail()) return false;
+
+    if (finalHash != nullptr) {
+        *finalHash = Sha256Hasher::hashFile(combined);
+        if (finalHash->empty()) return false;
+    }
 
     if (!MoveFileExW(combined.c_str(), destination.c_str(),
                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
@@ -137,11 +145,19 @@ bool reserveUniqueUpload(const std::filesystem::path& currentDir,
 enum class UploadKind { Store, Unique, Append };
 
 std::string transferCompleteMessage(const std::string& hash,
-                                    const std::string& uniqueFilename = {}) {
+                                    const std::string& uniqueFilename = {},
+                                    const std::string& finalHash = {}) {
     std::string message = "Transfer complete.";
     if (!uniqueFilename.empty()) message += " Filename=" + uniqueFilename;
     if (!hash.empty()) message += " SHA256=" + hash;
+    if (!finalHash.empty()) message += " FINAL_SHA256=" + finalHash;
     return message;
+}
+
+std::string uppercaseToken(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+        [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+    return value;
 }
 
 void finishTransfer(ClientSession& session, bool success,
@@ -288,8 +304,19 @@ void startUploadTransfer(ClientSession& session,
                 DataChannelSession channel(*transport, aborted);
                 bool success = ready && !aborted() &&
                     channel.receiveFile(receivePath, transferMode);
+                std::string payloadHash;
+                std::string finalHash;
                 if (success && kind == UploadKind::Append && !aborted()) {
-                    success = appendAtomically(destination, stagingPath);
+                    if (transferMode == TransferMode::Binary) {
+                        payloadHash = Sha256Hasher::hashFile(stagingPath);
+                        success = !payloadHash.empty();
+                    }
+                    if (success) {
+                        success = appendAtomically(
+                            destination, stagingPath,
+                            transferMode == TransferMode::Binary
+                                ? &finalHash : nullptr);
+                    }
                 }
 
                 std::error_code ignored;
@@ -300,13 +327,14 @@ void startUploadTransfer(ClientSession& session,
                     std::filesystem::remove(destination, ignored);
                 }
 
-                std::string hash;
-                if (success && transferMode == TransferMode::Binary) {
-                    hash = Sha256Hasher::hashFile(destination);
+                if (success && transferMode == TransferMode::Binary &&
+                    kind != UploadKind::Append) {
+                    payloadHash = Sha256Hasher::hashFile(destination);
                 }
                 finishTransfer(
                     session, success,
-                    transferCompleteMessage(hash, uniqueFilename));
+                    transferCompleteMessage(
+                        payloadHash, uniqueFilename, finalHash));
                 session.pendingUniqueFilename.clear();
             });
     } catch (const std::system_error&) {
@@ -320,6 +348,22 @@ void startUploadTransfer(ClientSession& session,
         sessionReply(session, ReplyCode::CantOpenDataConnection,
                      "Could not start transfer worker.");
     }
+}
+
+std::string formatDirectoryListing(const std::vector<DirEntryInfo>& entries,
+                                   bool namesOnly) {
+    std::string body;
+    for (std::size_t index = 0; index < entries.size(); ++index) {
+        if (index != 0) body.push_back('\n');
+        const auto& entry = entries[index];
+        if (namesOnly) {
+            body += entry.name;
+        } else {
+            body += entry.formatPermissions + " " +
+                    std::to_string(entry.sizeBytes) + " " + entry.name;
+        }
+    }
+    return body;
 }
 }
 
@@ -441,12 +485,23 @@ namespace CommandDispatcher{
 
     std::map<std::string, std::function<void(ClientSession&, const std::vector<std::string>&)>> commandMap = {
         { "USER", [](ClientSession& s, const std::vector<std::string>& args) {
-            std::string user = args.empty() ? "" : args[0];
+            s.authenticated = false;
+            s.username.clear();
+            ClientRegistry::setUsername(s.socket, "");
+            if (args.size() != 1) {
+                Session::replyWithCode(
+                    s.socket, ReplyCode::SyntaxError, "Syntax: USER <username>");
+                return;
+            }
+            const std::string& user = args[0];
             auto it = Users::database.find(user);
             if (it != Users::database.end()) {
                 s.username = user;
                 ClientRegistry::setUsername(s.socket, s.username);
-                Logger::log("Client " + ClientRegistry::clients[s.socket].address + " identified as \"" + s.username + "\".");
+                const auto client = ClientRegistry::findClient(s.socket);
+                const std::string address = client ? client->address : "unknown";
+                Logger::log("Client " + address + " identified as \"" +
+                            s.username + "\".");
                 Session::replyWithCode(s.socket, ReplyCode::AuthNeedPass, "Username OK, need password.");
             }
             else {
@@ -457,8 +512,14 @@ namespace CommandDispatcher{
 
         { "PASS", [](ClientSession& s, const std::vector<std::string>& args) {
             if (s.username.empty()) return Session::replyWithCode(s.socket, ReplyCode::BadSequence, "Log in with USER first.");
-            std::string pw = args.empty() ? "" : args[0];
-            if (pw == Users::database.find(s.username)->second) {
+            s.authenticated = false;
+            if (args.size() != 1) {
+                Session::replyWithCode(
+                    s.socket, ReplyCode::SyntaxError, "Syntax: PASS <password>");
+                return;
+            }
+            const auto user = Users::database.find(s.username);
+            if (user != Users::database.end() && args[0] == user->second) {
                 s.authenticated = true;   // Basic Level
                 Session::replyWithCode(s.socket, ReplyCode::LoggedIn, "User logged in.");
             }
@@ -513,10 +574,9 @@ namespace CommandDispatcher{
                 Session::replyWithCode(s.socket, ReplyCode::ActionNotTaken, "Could not list directory.");
                 return;
             }
-            std::string body;
-            for (auto& e : entries)
-                body += e.formatPermissions + " " + std::to_string(e.sizeBytes) + " " + e.name + "\r\n";
-            Session::replyWithCode(s.socket, ReplyCode::ActionCompleted, body);
+            Session::multilineReplyWithCode(
+                s.socket, ReplyCode::ActionCompleted,
+                formatDirectoryListing(entries, false));
         }},
 
         { "NLST", [](ClientSession& s, const std::vector<std::string>& args) {
@@ -531,9 +591,9 @@ namespace CommandDispatcher{
                 Session::replyWithCode(s.socket, ReplyCode::ActionNotTaken, "Could not list directory.");
                 return;
             }
-            std::string body;
-            for (auto& e : entries) body += e.name + "\r\n";
-            Session::replyWithCode(s.socket, ReplyCode::ActionCompleted, body);
+            Session::multilineReplyWithCode(
+                s.socket, ReplyCode::ActionCompleted,
+                formatDirectoryListing(entries, true));
         }},
 
         { "STAT", [](ClientSession& s, const std::vector<std::string>& args) {
@@ -721,22 +781,25 @@ namespace CommandDispatcher{
         } },
 
         { "TYPE", [](ClientSession& s, const std::vector<std::string>& args) {
-            if (args.size() != 1 || (args[0] != "A" && args[0] != "I")) {
+            const std::string type = args.size() == 1
+                ? uppercaseToken(args[0]) : std::string{};
+            if (type != "A" && type != "I") {
                 Session::replyWithCode(s.socket, ReplyCode::SyntaxError, "TYPE must be A or I.");
                 return;
             }
-            s.transferMode = (args[0] == "A") ? TransferMode::ASCII : TransferMode::Binary;
-            Session::replyWithCode(s.socket, ReplyCode::ActionCompleted, "Type set to " + args[0] + ".");
+            s.transferMode = (type == "A") ? TransferMode::ASCII : TransferMode::Binary;
+            Session::replyWithCode(s.socket, ReplyCode::ActionCompleted, "Type set to " + type + ".");
         } },
 
         { "MODE", [](ClientSession& s, const std::vector<std::string>& args) {
-            if (args.size() != 1 ||
-                (args[0] != "S" && args[0] != "B" && args[0] != "C")) {
+            const std::string mode = args.size() == 1
+                ? uppercaseToken(args[0]) : std::string{};
+            if (mode != "S" && mode != "B" && mode != "C") {
                 Session::replyWithCode(s.socket, ReplyCode::SyntaxError,
                                        "MODE must be S, B, or C.");
                 return;
             }
-            if (args[0] != "S") {
+            if (mode != "S") {
                 Session::replyWithCode(
                     s.socket, ReplyCode::CommandNotImplementedForParameter,
                     "Only MODE S is supported.");
@@ -778,7 +841,8 @@ namespace CommandDispatcher{
                 return;
             }
             else {
-                auto it = helpMap.find(args[0]);
+                const std::string requestedCommand = uppercaseToken(args[0]);
+                auto it = helpMap.find(requestedCommand);
                 if (it != helpMap.end()) {
                     Session::multilineReplyWithCode(s.socket, ReplyCode::HelpMessage, it->second);
                 }

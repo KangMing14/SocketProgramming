@@ -29,6 +29,14 @@
 #define CHAOS_LATENCY_MAX_MS 400 // Maximum artificial latency in ms
 #endif
 
+namespace {
+bool sameEndpoint(const sockaddr_in& left, const sockaddr_in& right) {
+  return left.sin_family == right.sin_family &&
+         left.sin_port == right.sin_port &&
+         left.sin_addr.s_addr == right.sin_addr.s_addr;
+}
+}
+
 // Constructor: creates the UDP socket, sets timeout, and saves the destination
 // address
 RdtSender::RdtSender(const std::string &targetIp, uint16_t targetPort,
@@ -51,15 +59,23 @@ RdtSender::RdtSender(const std::string &targetIp, uint16_t targetPort,
   // Step 2: Set the receive timeout
   // If recvfrom() waits longer than this, it gives up and returns an error
   // (WSAETIMEDOUT)
-  DWORD timeout = static_cast<DWORD>(timeoutMs);
-  setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout,
-             sizeof(timeout));
+  const DWORD timeout = static_cast<DWORD>(timeoutMs);
+  if (setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO,
+                 reinterpret_cast<const char*>(&timeout), sizeof(timeout)) ==
+      SOCKET_ERROR) {
+    closesocket(udpSocket);
+    udpSocket = INVALID_SOCKET;
+    return;
+  }
 
   // Step 3: Save the destination address (the receiver's IP and port)
-  memset(&destAddr, 0, sizeof(destAddr));
   destAddr.sin_family = AF_INET;
   destAddr.sin_port = htons(targetPort);
-  inet_pton(AF_INET, targetIp.c_str(), &destAddr.sin_addr);
+  if (targetPort == 0 ||
+      inet_pton(AF_INET, targetIp.c_str(), &destAddr.sin_addr) != 1) {
+    closesocket(udpSocket);
+    udpSocket = INVALID_SOCKET;
+  }
 }
 
 // Constructor for PASV mode: reuses an already-bound socket owned by the
@@ -72,11 +88,16 @@ RdtSender::RdtSender(SOCKET existingSocket, int initialTimeoutMs)
       cwnd(INITIAL_CWND),
       cleanAcks(0)
 {
-  memset(&destAddr, 0, sizeof(destAddr));
+  if (!isValid()) return;
   // Just apply the timeout — everything else is already set up by the caller.
-  DWORD timeout = static_cast<DWORD>(timeoutMs);
-  setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout,
-             sizeof(timeout));
+  const DWORD timeout = static_cast<DWORD>(timeoutMs);
+  if (setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO,
+                 reinterpret_cast<const char*>(&timeout), sizeof(timeout)) ==
+      SOCKET_ERROR) {
+    closesocket(udpSocket);
+    udpSocket = INVALID_SOCKET;
+    return;
+  }
   std::cout << "[Sender] Initialized with existing PASV socket." << std::endl;
 }
 
@@ -104,10 +125,8 @@ double RdtSender::getDevRttMs() const noexcept { return devRttMs; }
 size_t RdtSender::getCleanAckCount() const noexcept { return cleanAcks; }
 
 size_t RdtSender::effectiveWindowSize() const {
-    return std::max<size_t>(
-        1,
-        static_cast<size_t>(std::floor(cwnd))
-    );
+    return std::clamp<size_t>(
+        static_cast<size_t>(std::floor(cwnd)), 1, RDT_RECEIVE_WINDOW);
 }
 
 void RdtSender::updateRtt(double sampleRttMs) {
@@ -161,9 +180,8 @@ bool RdtSender::sendRawPacket(const RdtPacket &packet, std::chrono::steady_clock
   serializeHeader(packet.header, sendBuf);
 
   // Copy the payload right after the header
-  uint16_t payload_len = packet.header.payload_len;
-  if (payload_len > MAX_PAYLOAD)
-    payload_len = MAX_PAYLOAD;
+  const uint16_t payload_len = packet.header.payload_len;
+  if (payload_len > MAX_PAYLOAD) return false;
   memcpy(sendBuf + HEADER_SIZE, packet.payload, payload_len);
 
 #if CHAOS_MODE
@@ -265,23 +283,19 @@ bool RdtSender::pollAcksAndRetransmit(bool blocking)
         break;
       }
 
-      if (n >= static_cast<int>(HEADER_SIZE))
+      RdtHeader ackHeader{};
+      if (sameEndpoint(fromAddr, destAddr) &&
+          decodeValidatedDatagram(
+              recvBuf, static_cast<std::size_t>(n), ackHeader) &&
+          !(ackHeader.flags & FLAG_DATA) && ackHeader.payload_len == 0)
       {
-        char checksumBuf[HEADER_SIZE + MAX_PAYLOAD];
-        memcpy(checksumBuf, recvBuf, n);
-        checksumBuf[13] = 0;
-        checksumBuf[14] = 0;
+            if (ackHeader.flags & FLAG_NAK) {
+              std::cerr << "[Sender] Receiver rejected seq="
+                        << ackHeader.ack_num << "." << std::endl;
+              return false;
+            }
+            if (!(ackHeader.flags & FLAG_ACK)) continue;
 
-        uint16_t computed = internetChecksum((const uint8_t *)checksumBuf, n);
-        uint16_t received_checksum;
-        memcpy(&received_checksum, recvBuf + 13, 2);
-        received_checksum = ntohs(received_checksum);
-
-        if (computed == received_checksum)
-        {
-          RdtHeader ackHeader = deserializeHeader(recvBuf);
-          if (ackHeader.flags & FLAG_ACK)
-          {
             // Find the packet in the window and mark it acked
             for (auto &pkt : window)
             {
@@ -323,8 +337,6 @@ bool RdtSender::pollAcksAndRetransmit(bool blocking)
             {
               window.pop_front();
             }
-          }
-        }
       }
       
       // Force subsequent select calls in this loop to be non-blocking
@@ -517,26 +529,14 @@ bool RdtSender::waitForClientReady()
       return false;
     }
 
-    if (n < static_cast<int>(HEADER_SIZE))
+    RdtHeader header{};
+    if (!decodeValidatedDatagram(
+            recvBuf, static_cast<std::size_t>(n), header)) {
       continue;
+    }
 
-    // Verify Checksum
-    char checksumBuf[HEADER_SIZE + MAX_PAYLOAD];
-    memcpy(checksumBuf, recvBuf, n);
-    checksumBuf[13] = 0;
-    checksumBuf[14] = 0;
-
-    uint16_t computed = internetChecksum((const uint8_t *)checksumBuf, n);
-    uint16_t received_checksum;
-    memcpy(&received_checksum, recvBuf + 13, 2);
-    received_checksum = ntohs(received_checksum);
-
-    if (computed != received_checksum)
-      continue;
-
-    RdtHeader header = deserializeHeader(recvBuf);
-
-    if (header.flags & FLAG_SYN)
+    if ((header.flags & FLAG_SYN) && !(header.flags & FLAG_DATA) &&
+        header.payload_len == 0)
     {
       destAddr = clientAddr;
       std::cout << "[Sender] Received SYN packet! Client address captured." << std::endl;
@@ -556,9 +556,9 @@ bool RdtSender::waitForClientReady()
       ackHeader.checksum = internetChecksum((const uint8_t *)ackBuf, HEADER_SIZE);
       serializeHeader(ackHeader, ackBuf);
 
-      sendto(udpSocket, ackBuf, HEADER_SIZE, 0, (sockaddr *)&destAddr, sizeof(destAddr));
-
-      return true;
+      return sendto(udpSocket, ackBuf, static_cast<int>(HEADER_SIZE), 0,
+                    reinterpret_cast<sockaddr*>(&destAddr),
+                    sizeof(destAddr)) != SOCKET_ERROR;
     }
   }
 

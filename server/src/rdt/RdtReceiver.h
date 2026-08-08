@@ -10,8 +10,8 @@
 class RdtReceiver : public IRdtTransport
 {
 private:
-    SOCKET udpSocket;
-    sockaddr_in localAddr;
+    SOCKET udpSocket = INVALID_SOCKET;
+    sockaddr_in localAddr{};
     std::map<uint32_t, std::pair<std::vector<char>, bool>> outOfOrderBuffer;
     uint32_t expected_seq = 0;
     sockaddr_in peerAddr{};

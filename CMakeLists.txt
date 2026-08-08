@@ -10,14 +10,19 @@ add_library(ftp_protocol STATIC
 )
 target_include_directories(ftp_protocol PUBLIC shared/protocol)
 
+add_library(ftp_crypto STATIC
+    shared/crypto/Sha256Hasher.cpp
+)
+target_include_directories(ftp_crypto PUBLIC shared/crypto)
+
 add_library(ftp_server_core STATIC
+    server/src/common/ClientRegistry.cpp
     server/src/filesystem/PathResolver.cpp
     server/src/filesystem/DirectoryService.cpp
     server/src/filesystem/ChunkedFileReader.cpp
     server/src/filesystem/ChunkedFileWriter.cpp
     server/src/filesystem/AsciiTranslator.cpp
     server/src/filesystem/AsciiChunkedReader.cpp
-    server/src/crypto/Sha256Hasher.cpp
     server/src/datachannel/DataChannelSession.cpp
     server/src/datachannel/PassiveModeHandler.cpp
     server/src/datachannel/ActiveModeHandler.cpp
@@ -36,7 +41,7 @@ target_include_directories(ftp_server_core PUBLIC
     server/src/rdt
     server/src/common
 )
-target_link_libraries(ftp_server_core PUBLIC ftp_protocol)
+target_link_libraries(ftp_server_core PUBLIC ftp_protocol ftp_crypto)
 
 add_library(ftp_client_core STATIC
     client/src/control/Session.cpp
@@ -47,7 +52,6 @@ add_library(ftp_client_core STATIC
     client/src/fileio/ChunkedFileWriter.cpp
     client/src/fileio/AsciiTranslator.cpp
     client/src/fileio/AsciiChunkedReader.cpp
-    client/src/crypto/Sha256Hasher.cpp
     client/src/rdt/RdtSender.cpp
     client/src/rdt/RdtReceiver.cpp
 )
@@ -59,13 +63,15 @@ target_include_directories(ftp_client_core PUBLIC
     client/src/rdt
     client/src/common
 )
-target_link_libraries(ftp_client_core PUBLIC ftp_protocol)
+target_link_libraries(ftp_client_core PUBLIC ftp_protocol ftp_crypto)
 
 option(ENABLE_RDT_DEBUG "Enable RDT debug logging" OFF)
 if(ENABLE_RDT_DEBUG)
     target_compile_definitions(ftp_server_core PRIVATE RDT_DEBUG=1)
+    target_compile_definitions(ftp_client_core PRIVATE RDT_DEBUG=1)
 else()
     target_compile_definitions(ftp_server_core PRIVATE RDT_DEBUG=0)
+    target_compile_definitions(ftp_client_core PRIVATE RDT_DEBUG=0)
 endif()
 
 option(ENABLE_CHAOS_MODE "Enable artificial RDT network failures" OFF)
@@ -77,8 +83,9 @@ endif()
 
 if(WIN32)
     target_link_libraries(ftp_protocol PUBLIC ws2_32)
-    target_link_libraries(ftp_server_core PUBLIC ws2_32 bcrypt)
-    target_link_libraries(ftp_client_core PUBLIC ws2_32 bcrypt)
+    target_link_libraries(ftp_crypto PUBLIC bcrypt)
+    target_link_libraries(ftp_server_core PUBLIC ws2_32)
+    target_link_libraries(ftp_client_core PUBLIC ws2_32)
 endif()
 
 add_executable(ftp_server server/src/main.cpp)
@@ -102,8 +109,11 @@ add_server_test(test_rdt tests/test_rdt.cpp)
 add_server_test(test_rdt_payload_bounds tests/test_rdt_payload_bounds.cpp)
 add_server_test(test_rdt_integration tests/test_rdt_integration.cpp)
 add_server_test(test_rdt_congestion tests/test_rdt_congestion.cpp)
+add_server_test(test_rdt_validation tests/test_rdt_validation.cpp)
 add_server_test(test_ascii_translator tests/test_ascii_translator.cpp)
 add_server_test(test_temp_transfer tests/test_temp_transfer.cpp)
+add_server_test(test_data_channel tests/test_data_channel.cpp)
+add_server_test(test_control_session tests/test_control_session.cpp)
 
 add_executable(test_transfer_matrix tests/test_transfer_matrix.cpp)
 target_link_libraries(test_transfer_matrix PRIVATE ftp_server_core ftp_client_core)
@@ -120,6 +130,10 @@ add_test(NAME test_remaining_commands COMMAND test_remaining_commands)
 add_executable(test_temp_transfer_client tests/test_temp_transfer_client.cpp)
 target_link_libraries(test_temp_transfer_client PRIVATE ftp_client_core)
 add_test(NAME test_temp_transfer_client COMMAND test_temp_transfer_client)
+
+add_executable(test_data_channel_client tests/test_data_channel_client.cpp)
+target_link_libraries(test_data_channel_client PRIVATE ftp_client_core)
+add_test(NAME test_data_channel_client COMMAND test_data_channel_client)
 
 if(ENABLE_CHAOS_MODE)
     add_server_test(test_chaos_integrity tests/test_chaos_integrity.cpp)

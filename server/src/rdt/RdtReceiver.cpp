@@ -22,20 +22,6 @@ bool sameEndpoint(const sockaddr_in& left, const sockaddr_in& right) {
          left.sin_port == right.sin_port &&
          left.sin_addr.s_addr == right.sin_addr.s_addr;
 }
-
-bool hasValidChecksum(const char* bytes, int length) {
-  if (length < static_cast<int>(HEADER_SIZE)) return false;
-  char checksumBuf[HEADER_SIZE + MAX_PAYLOAD];
-  memcpy(checksumBuf, bytes, length);
-  checksumBuf[13] = 0;
-  checksumBuf[14] = 0;
-
-  uint16_t receivedChecksum = 0;
-  memcpy(&receivedChecksum, bytes + 13, sizeof(receivedChecksum));
-  receivedChecksum = ntohs(receivedChecksum);
-  return internetChecksum(reinterpret_cast<const uint8_t*>(checksumBuf), length) ==
-         receivedChecksum;
-}
 }
 
 bool RdtReceiver::isAbortRequested() const {
@@ -43,6 +29,7 @@ bool RdtReceiver::isAbortRequested() const {
 }
 
 void RdtReceiver::applyDataTimeout() {
+  if (!isValid()) return;
   const DWORD timeout = abortPredicate ? ABORT_POLL_TIMEOUT_MS
                                        : receiverIdleTimeout();
   setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO,
@@ -66,8 +53,15 @@ RdtReceiver::RdtReceiver(uint16_t listenPort) {
 
   // Step 2: Set the timeout so receiveData() doesn't block forever
   DWORD timeout = receiverIdleTimeout();
-  setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout,
-             sizeof(timeout));
+  if (setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO,
+                 reinterpret_cast<const char*>(&timeout), sizeof(timeout)) ==
+      SOCKET_ERROR) {
+    std::cerr << "[Receiver] setsockopt() failed: " << WSAGetLastError()
+              << std::endl;
+    closesocket(udpSocket);
+    udpSocket = INVALID_SOCKET;
+    return;
+  }
 
   // Step 3: BIND the socket to the listen port
   // This is the KEY difference from the sender — the receiver must nail down a
@@ -94,10 +88,16 @@ RdtReceiver::RdtReceiver(uint16_t listenPort) {
 // server's PassiveModeHandler. Does NOT call socket() or bind().
 RdtReceiver::RdtReceiver(SOCKET existingSocket)
     : udpSocket(existingSocket) {
+  if (!isValid()) return;
   // Just apply the timeout — socket is already created and bound by caller.
   DWORD timeout = receiverIdleTimeout();
-  setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout,
-             sizeof(timeout));
+  if (setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO,
+                 reinterpret_cast<const char*>(&timeout), sizeof(timeout)) ==
+      SOCKET_ERROR) {
+    closesocket(udpSocket);
+    udpSocket = INVALID_SOCKET;
+    return;
+  }
   std::cout << "[Receiver] Initialized with existing PASV socket." << std::endl;
 }
 
@@ -142,13 +142,15 @@ bool RdtReceiver::initiateActiveHandshake(const sockaddr_in& expectedPeer) {
       if (WSAGetLastError() == WSAETIMEDOUT) continue;
       return false;
     }
+    RdtHeader header{};
     if (!sameEndpoint(from, peerAddr) ||
-        !hasValidChecksum(receiveBuffer, received)) {
+        !decodeValidatedDatagram(
+            receiveBuffer, static_cast<std::size_t>(received), header)) {
       continue;
     }
 
-    const RdtHeader header = deserializeHeader(receiveBuffer);
-    if ((header.flags & FLAG_ACK) && header.ack_num == syn.seq_num) {
+    if ((header.flags & FLAG_ACK) && !(header.flags & FLAG_DATA) &&
+        header.payload_len == 0 && header.ack_num == syn.seq_num) {
       applyDataTimeout();
       return true;
     }
@@ -179,7 +181,7 @@ void RdtReceiver::sendAck(uint32_t ack_num, sockaddr_in &clientAddr) {
   ackHeader.seq_num = 0;
   ackHeader.ack_num = ack_num; // Tell the sender which packet we are ACKing
   ackHeader.flags = FLAG_ACK;  // Golden Rule: Set the FLAG_ACK bit
-  ackHeader.window_size = 1;
+  ackHeader.window_size = static_cast<std::uint16_t>(RDT_RECEIVE_WINDOW);
   ackHeader.payload_len = 0;
   ackHeader.reserved = 0;
   ackHeader.checksum = 0;
@@ -208,7 +210,6 @@ void RdtReceiver::sendAck(uint32_t ack_num, sockaddr_in &clientAddr) {
 //   duplicate
 bool RdtReceiver::receiveNext(uint32_t &outSeqNum, std::vector<char> &outData,
                               bool &outIsFinal) {
-  const int WINDOW_SIZE = 10;
   if (isAbortRequested()) return false;
   const auto idleDeadline = std::chrono::steady_clock::now() +
       std::chrono::milliseconds(receiverIdleTimeout());
@@ -255,14 +256,14 @@ bool RdtReceiver::receiveNext(uint32_t &outSeqNum, std::vector<char> &outData,
       return false;
     }
 
-    if (n < static_cast<int>(HEADER_SIZE)) continue;
-
-    if (!hasValidChecksum(recvBuf, n)) {
-      std::cerr << "[Receiver] Checksum MISMATCH, dropping." << std::endl;
+    RdtHeader header{};
+    if (!decodeValidatedDatagram(
+            recvBuf, static_cast<std::size_t>(n), header)) {
+      std::cerr << "[Receiver] Malformed or corrupt datagram, dropping."
+                << std::endl;
       continue;
     }
 
-    RdtHeader header = deserializeHeader(recvBuf);
     if (!(header.flags & FLAG_DATA)) continue;
     if (peerKnown && !sameEndpoint(clientAddr, peerAddr)) continue;
     if (!peerKnown) {
@@ -270,38 +271,43 @@ bool RdtReceiver::receiveNext(uint32_t &outSeqNum, std::vector<char> &outData,
       peerKnown = true;
     }
 
-    // ALWAYS ACK DATA PACKETS IN SELECTIVE REPEAT
-    sendAck(header.seq_num, clientAddr);
+    if (header.seq_num < expected_seq) {
+      sendAck(header.seq_num, clientAddr);
+      continue;
+    }
 
-    uint16_t payload_len = header.payload_len;
-    if (payload_len > MAX_PAYLOAD) payload_len = MAX_PAYLOAD;
-    int actual_payload = n - HEADER_SIZE;
-    if (payload_len > actual_payload) payload_len = actual_payload;
+    const std::uint64_t windowEnd =
+        static_cast<std::uint64_t>(expected_seq) + RDT_RECEIVE_WINDOW;
+    if (static_cast<std::uint64_t>(header.seq_num) >= windowEnd) {
+      std::cerr << "[Receiver] Packet seq=" << header.seq_num
+                << " is outside receive window, dropping without ACK."
+                << std::endl;
+      continue;
+    }
+
+    const std::size_t payloadLength = header.payload_len;
+    sendAck(header.seq_num, clientAddr);
 
     if (header.seq_num == expected_seq) {
       // In-order packet
-      outData.resize(payload_len);
-      memcpy(outData.data(), recvBuf + HEADER_SIZE, payload_len);
+      outData.resize(payloadLength);
+      if (payloadLength > 0) {
+        memcpy(outData.data(), recvBuf + HEADER_SIZE, payloadLength);
+      }
       outSeqNum = header.seq_num;
       outIsFinal = (header.flags & FLAG_FIN) != 0;
       expected_seq++;
       return true;
-    } else if (header.seq_num > expected_seq) {
-      // Out-of-order packet (future)
-      // Enforce strict upper bound to prevent memory exhaustion
-      if (header.seq_num <= expected_seq + WINDOW_SIZE) {
-        if (outOfOrderBuffer.find(header.seq_num) == outOfOrderBuffer.end()) {
-          std::vector<char> data(payload_len);
-          memcpy(data.data(), recvBuf + HEADER_SIZE, payload_len);
-          bool isFin = (header.flags & FLAG_FIN) != 0;
-          outOfOrderBuffer[header.seq_num] = std::make_pair(data, isFin);
-        }
-      } else {
-        std::cerr << "[Receiver] Packet seq=" << header.seq_num << " is too far ahead (>" << expected_seq + WINDOW_SIZE << "), dropping." << std::endl;
-      }
     } else {
-      // Duplicate packet (past)
-      // Already ACKed it above, just ignore
+      if (outOfOrderBuffer.find(header.seq_num) == outOfOrderBuffer.end()) {
+        std::vector<char> data(payloadLength);
+        if (payloadLength > 0) {
+          memcpy(data.data(), recvBuf + HEADER_SIZE, payloadLength);
+        }
+        const bool isFin = (header.flags & FLAG_FIN) != 0;
+        outOfOrderBuffer.emplace(
+            header.seq_num, std::make_pair(std::move(data), isFin));
+      }
     }
   }
 }
