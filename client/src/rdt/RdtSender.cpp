@@ -7,7 +7,14 @@ namespace hybridftp::client
 {
 
 #define MAX_RETRIES 10
-#define HEADER_SIZE 16
+
+  namespace {
+  bool sameEndpoint(const sockaddr_in& left, const sockaddr_in& right) {
+    return left.sin_family == right.sin_family &&
+           left.sin_port == right.sin_port &&
+           left.sin_addr.s_addr == right.sin_addr.s_addr;
+  }
+  }
 
   bool RdtSender::isAbortRequested() const
   {
@@ -37,15 +44,23 @@ namespace hybridftp::client
     // Step 2: Set the receive timeout
     // If recvfrom() waits longer than this, it gives up and returns an error
     // (WSAETIMEDOUT)
-    DWORD timeout = static_cast<DWORD>(timeoutMs);
-    setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout,
-               sizeof(timeout));
+    const DWORD timeout = static_cast<DWORD>(timeoutMs);
+    if (setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO,
+                   reinterpret_cast<const char*>(&timeout), sizeof(timeout)) ==
+        SOCKET_ERROR) {
+      closesocket(udpSocket);
+      udpSocket = INVALID_SOCKET;
+      return;
+    }
 
     // Step 3: Save the destination address (the receiver's IP and port)
-    memset(&destAddr, 0, sizeof(destAddr));
     destAddr.sin_family = AF_INET;
     destAddr.sin_port = htons(targetPort);
-    inet_pton(AF_INET, targetIp.c_str(), &destAddr.sin_addr);
+    if (targetPort == 0 ||
+        inet_pton(AF_INET, targetIp.c_str(), &destAddr.sin_addr) != 1) {
+      closesocket(udpSocket);
+      udpSocket = INVALID_SOCKET;
+    }
   }
 
   // Constructor for PASV mode: reuses an already-bound socket owned by the
@@ -54,19 +69,30 @@ namespace hybridftp::client
                        int timeoutMs)
       : udpSocket(existingSocket), destAddr(targetAddr), timeoutMs(timeoutMs)
   {
+    if (!isValid()) return;
     // Just apply the timeout — everything else is already set up by the caller.
-    DWORD timeout = static_cast<DWORD>(timeoutMs);
-    setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout,
-               sizeof(timeout));
+    const DWORD timeout = static_cast<DWORD>(timeoutMs);
+    if (setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO,
+                   reinterpret_cast<const char*>(&timeout), sizeof(timeout)) ==
+        SOCKET_ERROR) {
+      closesocket(udpSocket);
+      udpSocket = INVALID_SOCKET;
+      return;
+    }
     std::cout << "[Sender] Initialized with existing PASV socket." << std::endl;
   }
 
   RdtSender::RdtSender(SOCKET existingSocket, int timeoutMs)
       : udpSocket(existingSocket), destAddr{}, timeoutMs(timeoutMs)
   {
-    DWORD timeout = static_cast<DWORD>(timeoutMs);
-    setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO,
-               reinterpret_cast<const char *>(&timeout), sizeof(timeout));
+    if (!isValid()) return;
+    const DWORD timeout = static_cast<DWORD>(timeoutMs);
+    if (setsockopt(udpSocket, SOL_SOCKET, SO_RCVTIMEO,
+                   reinterpret_cast<const char*>(&timeout), sizeof(timeout)) ==
+        SOCKET_ERROR) {
+      closesocket(udpSocket);
+      udpSocket = INVALID_SOCKET;
+    }
   }
 
   // Destructor: always close the socket to free up OS resources
@@ -79,7 +105,7 @@ namespace hybridftp::client
   }
 
   // PRIVATE HELPER: Physically serialize and shoot one packet into the network
-  void RdtSender::sendRawPacket(const RdtPacket &packet)
+  bool RdtSender::sendRawPacket(const RdtPacket &packet)
   {
     // We need a flat byte buffer: [16-byte header][payload bytes]
     char sendBuf[HEADER_SIZE + MAX_PAYLOAD];
@@ -90,10 +116,11 @@ namespace hybridftp::client
     serializeHeader(packet.header, sendBuf);
 
     // Copy the payload right after the header
-    uint16_t payload_len = packet.header.payload_len;
-    if (payload_len > MAX_PAYLOAD)
-      payload_len = MAX_PAYLOAD;
-    memcpy(sendBuf + HEADER_SIZE, packet.payload, payload_len);
+    const uint16_t payload_len = packet.header.payload_len;
+    if (payload_len > MAX_PAYLOAD) return false;
+    if (payload_len > 0) {
+      memcpy(sendBuf + HEADER_SIZE, packet.payload, payload_len);
+    }
 
     // sendto() shoots this flat buffer as a UDP postcard to destAddr
     int totalSize = HEADER_SIZE + payload_len;
@@ -103,7 +130,9 @@ namespace hybridftp::client
     if (sent == SOCKET_ERROR)
     {
       std::cerr << "[Sender] sendto() failed: " << WSAGetLastError() << std::endl;
+      return false;
     }
+    return sent == totalSize;
   }
 
   // PRIVATE HELPER: Waits for an ACK packet matching the expected sequence number
@@ -136,49 +165,25 @@ namespace hybridftp::client
         return false; // Real timeout, return false so sendChunk will retransmit
       }
 
-      if (n < HEADER_SIZE)
-      {
-        std::cerr << "[Sender] Packet too small, ignoring." << std::endl;
-        continue;
-      }
-
-      // Verify Checksum
-      char checksumBuf[HEADER_SIZE + MAX_PAYLOAD];
-      memcpy(checksumBuf, recvBuf, n);
-      checksumBuf[13] = 0;
-      checksumBuf[14] = 0;
-
-      uint16_t computed = internetChecksum((const uint8_t *)checksumBuf, n);
-      uint16_t received_checksum;
-      memcpy(&received_checksum, recvBuf + 13, 2);
-      received_checksum = ntohs(received_checksum);
-
-      if (computed != received_checksum)
-      {
-        std::cerr << "[Sender] Checksum MISMATCH on ACK, ignoring." << std::endl;
-        continue;
-      }
-
-      // Deserialize the received bytes back into a header struct
-      RdtHeader ackHeader = deserializeHeader(recvBuf);
-
-      // Golden Rule: Verify this is actually a proper ACK with FLAG_ACK set
-      if (!(ackHeader.flags & FLAG_ACK))
-      {
-        std::cerr << "[Sender] Received packet is not an ACK, ignoring."
-                  << std::endl;
+      RdtHeader validatedAck{};
+      if (!sameEndpoint(fromAddr, destAddr) ||
+          !decodeValidatedDatagram(
+              recvBuf, static_cast<std::size_t>(n), validatedAck) ||
+          !(validatedAck.flags & FLAG_ACK) ||
+          (validatedAck.flags & FLAG_DATA) ||
+          validatedAck.payload_len != 0) {
         continue;
       }
 
       // Check if the ACK matches what we were waiting for
-      if (ackHeader.ack_num == expected_ack_num)
+      if (validatedAck.ack_num == expected_ack_num)
       {
         return true; // Success!
       }
 
       // We got an ACK, but for the wrong packet (stale ACK from a previous
       // retransmit)
-      std::cerr << "[Sender] Stale ACK received (got " << ackHeader.ack_num
+      std::cerr << "[Sender] Stale ACK received (got " << validatedAck.ack_num
                 << " expected " << expected_ack_num << "), ignoring." << std::endl;
     }
   }
@@ -228,7 +233,7 @@ namespace hybridftp::client
       std::cout << "[Sender] Sending seq=" << seqNum << " (attempt "
                 << attempt + 1 << "/" << MAX_RETRIES << ")" << std::endl;
 
-      sendRawPacket(packet);
+      if (!sendRawPacket(packet)) continue;
 
       if (waitForAck(seqNum))
       {
@@ -276,34 +281,19 @@ namespace hybridftp::client
           continue;
         return false;
       }
-      if (received < static_cast<int>(HEADER_SIZE) ||
-          from.sin_addr.s_addr != expectedServerIp.s_addr)
-      {
-        continue;
-      }
-
-      char checksumBuffer[HEADER_SIZE + MAX_PAYLOAD];
-      memcpy(checksumBuffer, receiveBuffer, received);
-      checksumBuffer[13] = 0;
-      checksumBuffer[14] = 0;
-      uint16_t receivedChecksum = 0;
-      memcpy(&receivedChecksum, receiveBuffer + 13, sizeof(receivedChecksum));
-      receivedChecksum = ntohs(receivedChecksum);
-      if (internetChecksum(reinterpret_cast<const uint8_t *>(checksumBuffer), received) !=
-          receivedChecksum)
-      {
-        continue;
-      }
-
-      const RdtHeader syn = deserializeHeader(receiveBuffer);
-      if (!(syn.flags & FLAG_SYN))
+      RdtHeader syn{};
+      if (from.sin_addr.s_addr != expectedServerIp.s_addr ||
+          !decodeValidatedDatagram(
+              receiveBuffer, static_cast<std::size_t>(received), syn) ||
+          !(syn.flags & FLAG_SYN) || (syn.flags & FLAG_DATA) ||
+          syn.payload_len != 0)
         continue;
       destAddr = from;
 
       RdtHeader ack{};
       ack.ack_num = syn.seq_num;
       ack.flags = FLAG_ACK;
-      ack.window_size = 1;
+      ack.window_size = static_cast<std::uint16_t>(RDT_RECEIVE_WINDOW);
       char ackBuffer[HEADER_SIZE]{};
       serializeHeader(ack, ackBuffer);
       ack.checksum = internetChecksum(

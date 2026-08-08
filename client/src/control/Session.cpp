@@ -143,15 +143,36 @@ std::string upper(std::string value) {
     return value;
 }
 
-bool extractHash(const std::string& replyLine, std::string& outHash) {
-    const std::string marker = "SHA256=";
-    size_t pos = replyLine.find(marker);
-    if (pos == std::string::npos) return false;
-    outHash = replyLine.substr(pos + marker.size());
-    while (!outHash.empty() && !std::isxdigit(static_cast<unsigned char>(outHash.back()))) {
-        outHash.pop_back();
+std::string canonicalizeCommandVerb(std::string command) {
+    const std::size_t first = command.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return command;
+    const std::size_t end = command.find_first_of(" \t\r\n", first);
+    const std::size_t length = end == std::string::npos
+        ? command.size() - first : end - first;
+    std::transform(command.begin() + static_cast<std::ptrdiff_t>(first),
+                   command.begin() + static_cast<std::ptrdiff_t>(first + length),
+                   command.begin() + static_cast<std::ptrdiff_t>(first),
+                   [](unsigned char ch) {
+                       return static_cast<char>(std::toupper(ch));
+                   });
+    return command;
+}
+
+bool extractHashField(const std::string& replyLine,
+                      const std::string& field,
+                      std::string& outHash) {
+    std::istringstream tokens(replyLine);
+    std::string token;
+    const std::string prefix = field + "=";
+    while (tokens >> token) {
+        if (token.rfind(prefix, 0) != 0) continue;
+        outHash = token.substr(prefix.size());
+        return outHash.size() == 64 &&
+            std::all_of(outHash.begin(), outHash.end(), [](unsigned char ch) {
+                return std::isxdigit(ch) != 0;
+            });
     }
-    return outHash.size() == 64;
+    return false;
 }
 
 bool enterActiveMode(SOCKET controlSocket, ClientState& state,
@@ -279,7 +300,7 @@ bool storeFile(SOCKET controlSocket, ClientState& state,
     try {
         state.transferWorker = std::thread(
             [controlSocket, &state, localPath, mode, dataSocket,
-             passiveAddress, serverAddress, transferMode]() {
+             passiveAddress, serverAddress, transferMode, verb]() {
                 const auto aborted = [&state] {
                     return state.abortRequested.load();
                 };
@@ -310,7 +331,7 @@ bool storeFile(SOCKET controlSocket, ClientState& state,
                            transferMode == TransferMode::Binary &&
                            !sendResult.sha256.empty()) {
                     std::string serverHash;
-                    if (extractHash(completion.line, serverHash)) {
+                    if (extractHashField(completion.line, "SHA256", serverHash)) {
                         if (serverHash == sendResult.sha256) {
                             std::cout << "Integrity verified: SHA-256 matches ("
                                       << serverHash << ")\n";
@@ -318,6 +339,14 @@ bool storeFile(SOCKET controlSocket, ClientState& state,
                             std::cerr << "WARNING: hash mismatch! Local="
                                       << sendResult.sha256 << " Server="
                                       << serverHash << "\n";
+                        }
+                    }
+                    if (verb == "APPE") {
+                        std::string finalHash;
+                        if (extractHashField(
+                                completion.line, "FINAL_SHA256", finalHash)) {
+                            std::cout << "Final remote SHA-256: "
+                                      << finalHash << "\n";
                         }
                     }
                 }
@@ -399,7 +428,7 @@ bool retrieveFile(SOCKET controlSocket, ClientState& state,
                 } else if (replyOkay && !aborted() &&
                            transferMode == TransferMode::Binary) {
                     std::string serverHash;
-                    if (extractHash(completion.line, serverHash)) {
+                    if (extractHashField(completion.line, "SHA256", serverHash)) {
                         const std::string localHash =
                             Sha256Hasher::hashFile(localPath);
                         if (localHash == serverHash) {
@@ -425,7 +454,7 @@ bool retrieveFile(SOCKET controlSocket, ClientState& state,
 bool forwardCommand(SOCKET controlSocket, ClientState& state,
                     const std::string& command,
                     const std::vector<std::string>& tokens) {
-    if (!sendCommand(controlSocket, command)) return false;
+    if (!sendCommand(controlSocket, canonicalizeCommandVerb(command))) return false;
     Reply reply;
     if (!printReply(controlSocket, state, reply)) return false;
 

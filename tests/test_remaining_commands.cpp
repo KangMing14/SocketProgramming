@@ -1,6 +1,7 @@
 #include "../server/src/common/Globals.h"
 #include "../server/src/common/ReplyCodes.h"
 #include "../server/src/control/Session.h"
+#include "../server/src/crypto/Sha256Hasher.h"
 
 #include "../client/src/datachannel/ActiveModeClient.h"
 #include "../client/src/datachannel/DataChannelSession.h"
@@ -165,15 +166,58 @@ std::string extractFilename(const std::string& line) {
     return line.substr(valueStart, end - valueStart);
 }
 
+std::string extractField(const std::string& line, const std::string& field) {
+    const std::string marker = field + "=";
+    const std::size_t start = line.find(marker);
+    require(start != std::string::npos, "Reply omitted " + field);
+    const std::size_t valueStart = start + marker.size();
+    const std::size_t end = line.find_first_of(" \r\n", valueStart);
+    return line.substr(valueStart, end - valueStart);
+}
+
 void login(SOCKET control, ReplyReader& replies) {
     require(replies.read(control).code == ReplyCode::ServiceReady,
             "Expected 220 greeting");
-    sendCommand(control, "USER user");
+    sendCommand(control, "uSeR User1");
     require(replies.read(control).code == ReplyCode::AuthNeedPass,
             "Expected 331 after USER");
-    sendCommand(control, "PASS password");
+    sendCommand(control, "pAsS password");
     require(replies.read(control).code == ReplyCode::LoggedIn,
             "Expected 230 after PASS");
+
+    sendCommand(control, "USER user1");
+    require(replies.read(control).code == ReplyCode::NotLoggedIn,
+            "Unknown USER did not clear the authenticated state");
+    sendCommand(control, "PASS password");
+    require(replies.read(control).code == ReplyCode::BadSequence,
+            "PASS succeeded after an unknown USER");
+
+    sendCommand(control, "USER User1");
+    require(replies.read(control).code == ReplyCode::AuthNeedPass,
+            "Valid USER was not accepted after reset");
+    sendCommand(control, "PASS wrong");
+    require(replies.read(control).code == ReplyCode::NotLoggedIn,
+            "Wrong password was not rejected");
+    sendCommand(control, "pWd");
+    require(replies.read(control).code == ReplyCode::NotLoggedIn,
+            "Failed PASS left the session authenticated");
+    sendCommand(control, "PASS password");
+    require(replies.read(control).code == ReplyCode::LoggedIn,
+            "Valid password could not recover the pending USER attempt");
+
+    sendCommand(control, "USER User1");
+    require(replies.read(control).code == ReplyCode::AuthNeedPass,
+            "USER while logged in did not start a new authentication attempt");
+    sendCommand(control, "PWD");
+    require(replies.read(control).code == ReplyCode::NotLoggedIn,
+            "USER while logged in did not revoke authentication");
+    sendCommand(control, "PASS password");
+    require(replies.read(control).code == ReplyCode::LoggedIn,
+            "Re-authentication failed");
+
+    sendCommand(control, "pWd");
+    require(replies.read(control).code == ReplyCode::PathnameCreated,
+            "Mixed-case PWD command was not accepted");
 }
 
 } // namespace
@@ -201,7 +245,7 @@ int main() {
         ReplyReader replies;
         login(control, replies);
 
-        sendCommand(control, "MODE S");
+        sendCommand(control, "mOdE s");
         require(replies.read(control).code == ReplyCode::CommandOkay,
                 "MODE S was not accepted");
         sendCommand(control, "MODE B");
@@ -250,6 +294,12 @@ int main() {
         require(append.code == ReplyCode::TransferComplete &&
                     readText(g_pathResolver.root() / "append.txt") == "base-beta",
                 "APPE did not append atomically");
+        require(extractField(append.line, "SHA256") ==
+                    Sha256Hasher::hashFile(secondSource),
+                "APPE payload hash did not match the uploaded fragment");
+        require(extractField(append.line, "FINAL_SHA256") ==
+                    Sha256Hasher::hashFile(g_pathResolver.root() / "append.txt"),
+                "APPE final hash did not match the resulting destination");
 
         writeText(g_pathResolver.root() / "preserve.txt", "original");
         SOCKET abortUploadSocket = prepareActiveEndpoint(control, replies);

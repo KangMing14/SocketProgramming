@@ -22,9 +22,9 @@ private:
   static constexpr double MIN_CWND = 1.0;
   static constexpr double INITIAL_CWND = 4.0;
 
-  SOCKET udpSocket;
-  sockaddr_in destAddr;
-  int timeoutMs;
+  SOCKET udpSocket = INVALID_SOCKET;
+  sockaddr_in destAddr{};
+  int timeoutMs = 500;
 
   double estimatedRttMs;
   double devRttMs;

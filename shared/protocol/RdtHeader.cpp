@@ -1,6 +1,8 @@
 #include "RdtHeader.h"
+#include "CheckSum.h"
 
 #include <winsock2.h>
+#include <array>
 #include <cstring>
 
 void serializeHeader(const RdtHeader& header, char* buffer) {
@@ -41,4 +43,33 @@ RdtHeader deserializeHeader(const char* buffer) {
     header.payload_len = ntohs(payloadLength);
     header.checksum = ntohs(checksum);
     return header;
+}
+
+bool decodeValidatedDatagram(const char* bytes, std::size_t length,
+                             RdtHeader& header) {
+    if (bytes == nullptr || length < HEADER_SIZE ||
+        length > HEADER_SIZE + MAX_PAYLOAD) {
+        return false;
+    }
+
+    const RdtHeader decoded = deserializeHeader(bytes);
+    if (decoded.payload_len > MAX_PAYLOAD ||
+        length != HEADER_SIZE + decoded.payload_len) {
+        return false;
+    }
+    const bool headerOnlyControl =
+        (decoded.flags & (FLAG_SYN | FLAG_ACK)) != 0 &&
+        (decoded.flags & FLAG_DATA) == 0;
+    if (headerOnlyControl && decoded.payload_len != 0) return false;
+
+    std::array<char, HEADER_SIZE + MAX_PAYLOAD> checksumBytes{};
+    std::memcpy(checksumBytes.data(), bytes, length);
+    checksumBytes[13] = 0;
+    checksumBytes[14] = 0;
+    const std::uint16_t computed = internetChecksum(
+        reinterpret_cast<const std::uint8_t*>(checksumBytes.data()), length);
+    if (computed != decoded.checksum) return false;
+
+    header = decoded;
+    return true;
 }

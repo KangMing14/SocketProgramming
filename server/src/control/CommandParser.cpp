@@ -1,5 +1,8 @@
 #include "CommandParser.h"
 
+#include <algorithm>
+#include <cctype>
+
 namespace CommandParser{
     // Helper to remove leading and trailing whitespace
     std::string trim(const std::string& str) {
@@ -17,6 +20,9 @@ namespace CommandParser{
         std::stringstream ss(trimmedCmd);
         std::string tmp;
         ss >> cmd.type;
+        std::transform(cmd.type.begin(), cmd.type.end(), cmd.type.begin(),
+            [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+        cmd.rawCommand = trimmedCmd;
         while (ss >> tmp) {
             cmd.args.push_back(tmp);
         }

@@ -14,6 +14,7 @@
 #include <thread>
 #include <filesystem>
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 #include "TransferMode.h"
 
@@ -48,7 +49,7 @@ struct ClientSession {
 namespace Session {
     void replyWithCode(SOCKET, int, std::string);
     void multilineReplyWithCode(SOCKET, int, std::string);
-    SOCKET initializeSession();
+    SOCKET initializeSession(std::uint16_t port = 4567);
     void handleClient(SOCKET);
     void runSession();
 }

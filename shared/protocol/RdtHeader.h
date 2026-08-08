@@ -44,6 +44,8 @@ struct RdtPacket {
 
 void serializeHeader(const RdtHeader& header, char* buffer);
 RdtHeader deserializeHeader(const char* buffer);
+bool decodeValidatedDatagram(const char* bytes, std::size_t length,
+                             RdtHeader& header);
 
 constexpr std::size_t HEADER_SIZE = sizeof(RdtHeader);
 static_assert(HEADER_SIZE == 16, "header must be 16 bytes on the wire");

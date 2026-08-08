@@ -3,6 +3,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <winsock2.h>
 
@@ -91,6 +92,64 @@ void testHeaderRoundTripAndChecksum() {
     std::cout << "[PASS] header serialization and checksum\n";
 }
 
+std::vector<char> makeDatagram(std::uint8_t flags,
+                               std::uint16_t declaredLength,
+                               std::size_t actualLength) {
+    RdtHeader header{};
+    header.seq_num = 7;
+    header.flags = flags;
+    header.window_size = 1;
+    header.payload_len = declaredLength;
+
+    std::vector<char> bytes(HEADER_SIZE + actualLength, 'x');
+    serializeHeader(header, bytes.data());
+    header.checksum = internetChecksum(
+        reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size());
+    serializeHeader(header, bytes.data());
+    return bytes;
+}
+
+void testStrictDatagramValidation() {
+    RdtHeader decoded{};
+
+    const auto valid = makeDatagram(FLAG_DATA, 3, 3);
+    require(decodeValidatedDatagram(valid.data(), valid.size(), decoded),
+            "Valid DATA datagram was rejected");
+    require(decoded.payload_len == 3, "Validated payload length changed");
+
+    const auto truncated = makeDatagram(FLAG_DATA, 3, 2);
+    require(!decodeValidatedDatagram(
+                truncated.data(), truncated.size(), decoded),
+            "Truncated payload was accepted");
+
+    const auto trailing = makeDatagram(FLAG_DATA, 2, 3);
+    require(!decodeValidatedDatagram(trailing.data(), trailing.size(), decoded),
+            "Trailing payload bytes were accepted");
+
+    const auto oversized = makeDatagram(
+        FLAG_DATA, static_cast<std::uint16_t>(MAX_PAYLOAD + 1), 0);
+    require(!decodeValidatedDatagram(
+                oversized.data(), oversized.size(), decoded),
+            "Oversized declared payload was accepted");
+
+    const auto ackWithPayload = makeDatagram(FLAG_ACK, 1, 1);
+    require(!decodeValidatedDatagram(
+                ackWithPayload.data(), ackWithPayload.size(), decoded),
+            "ACK with payload was accepted");
+
+    const auto emptyFinal = makeDatagram(
+        static_cast<std::uint8_t>(FLAG_DATA | FLAG_FIN), 0, 0);
+    require(decodeValidatedDatagram(
+                emptyFinal.data(), emptyFinal.size(), decoded),
+            "Empty DATA|FIN datagram was rejected");
+
+    const auto maximum = makeDatagram(
+        FLAG_DATA, static_cast<std::uint16_t>(MAX_PAYLOAD), MAX_PAYLOAD);
+    require(decodeValidatedDatagram(maximum.data(), maximum.size(), decoded),
+            "MAX_PAYLOAD datagram was rejected");
+    std::cout << "[PASS] strict datagram length and control validation\n";
+}
+
 }  // namespace
 
 
@@ -98,6 +157,7 @@ int main() {
     try {
         WinsockSession winsock;
         testHeaderRoundTripAndChecksum();
+        testStrictDatagramValidation();
         return 0;
     } catch (const std::exception& exception) {
         std::cerr << "[FAIL] " << exception.what() << '\n';

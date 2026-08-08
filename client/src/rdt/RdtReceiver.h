@@ -5,20 +5,23 @@
 #include <string>
 #include <map>
 #include <functional>
+#include <vector>
 
 namespace hybridftp::client {
 
 class RdtReceiver : public IRdtTransport
 {
 private:
-    SOCKET udpSocket;
-    sockaddr_in localAddr;
+    SOCKET udpSocket = INVALID_SOCKET;
+    sockaddr_in localAddr{};
     sockaddr_in peerAddr{};
     bool peerKnown = false;
     bool expectedPeerIpSet = false;
     in_addr expectedPeerIp{};
     std::map<uint32_t, std::pair<std::vector<char>, bool>> outOfOrderBuffer;
     uint32_t expectedSequence = 0;
+    std::vector<char> pendingDatagram;
+    sockaddr_in pendingFrom{};
     std::function<bool()> abortPredicate;
 
     // Helper to send an ACK back to whatever address just sent us data
