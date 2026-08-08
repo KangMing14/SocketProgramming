@@ -287,9 +287,15 @@ bool RdtSender::pollAcksAndRetransmit(bool blocking)
       if (sameEndpoint(fromAddr, destAddr) &&
           decodeValidatedDatagram(
               recvBuf, static_cast<std::size_t>(n), ackHeader) &&
-          (ackHeader.flags & FLAG_ACK) &&
           !(ackHeader.flags & FLAG_DATA) && ackHeader.payload_len == 0)
       {
+            if (ackHeader.flags & FLAG_NAK) {
+              std::cerr << "[Sender] Receiver rejected seq="
+                        << ackHeader.ack_num << "." << std::endl;
+              return false;
+            }
+            if (!(ackHeader.flags & FLAG_ACK)) continue;
+
             // Find the packet in the window and mark it acked
             for (auto &pkt : window)
             {

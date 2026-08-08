@@ -153,8 +153,29 @@ void testEarlyDataCompletesPassiveHandshake() {
     assert(sequence == 0 && isFinal);
     assert(std::string(received.begin(), received.end()) == payload);
 
+    fd_set readSet;
+    FD_ZERO(&readSet);
+    FD_SET(server, &readSet);
+    timeval waitBeforeCommit{};
+    waitBeforeCommit.tv_usec = 100000;
+    assert(select(0, &readSet, nullptr, nullptr, &waitBeforeCommit) == 0);
+
+    assert(receiver.confirmReceive(sequence, true));
+    char ackBytes[HEADER_SIZE]{};
+    sockaddr_in ackFrom{};
+    int ackFromLength = sizeof(ackFrom);
+    const int ackLength = recvfrom(
+        server, ackBytes, sizeof(ackBytes), 0,
+        reinterpret_cast<sockaddr*>(&ackFrom), &ackFromLength);
+    RdtHeader acknowledgement{};
+    assert(ackLength == static_cast<int>(HEADER_SIZE) &&
+           decodeValidatedDatagram(
+               ackBytes, static_cast<std::size_t>(ackLength), acknowledgement));
+    assert((acknowledgement.flags & FLAG_ACK) != 0 &&
+           acknowledgement.ack_num == sequence);
+
     closesocket(server);
-    std::cout << "[PASS] early DATA survives a lost passive handshake ACK\n";
+    std::cout << "[PASS] final DATA is acknowledged after client commit\n";
 }
 
 void testClientSenderRejectsWrongAckEndpoint() {

@@ -349,6 +349,22 @@ void startUploadTransfer(ClientSession& session,
                      "Could not start transfer worker.");
     }
 }
+
+std::string formatDirectoryListing(const std::vector<DirEntryInfo>& entries,
+                                   bool namesOnly) {
+    std::string body;
+    for (std::size_t index = 0; index < entries.size(); ++index) {
+        if (index != 0) body.push_back('\n');
+        const auto& entry = entries[index];
+        if (namesOnly) {
+            body += entry.name;
+        } else {
+            body += entry.formatPermissions + " " +
+                    std::to_string(entry.sizeBytes) + " " + entry.name;
+        }
+    }
+    return body;
+}
 }
 
 namespace CommandDispatcher{
@@ -558,10 +574,9 @@ namespace CommandDispatcher{
                 Session::replyWithCode(s.socket, ReplyCode::ActionNotTaken, "Could not list directory.");
                 return;
             }
-            std::string body;
-            for (auto& e : entries)
-                body += e.formatPermissions + " " + std::to_string(e.sizeBytes) + " " + e.name + "\r\n";
-            Session::replyWithCode(s.socket, ReplyCode::ActionCompleted, body);
+            Session::multilineReplyWithCode(
+                s.socket, ReplyCode::ActionCompleted,
+                formatDirectoryListing(entries, false));
         }},
 
         { "NLST", [](ClientSession& s, const std::vector<std::string>& args) {
@@ -576,9 +591,9 @@ namespace CommandDispatcher{
                 Session::replyWithCode(s.socket, ReplyCode::ActionNotTaken, "Could not list directory.");
                 return;
             }
-            std::string body;
-            for (auto& e : entries) body += e.name + "\r\n";
-            Session::replyWithCode(s.socket, ReplyCode::ActionCompleted, body);
+            Session::multilineReplyWithCode(
+                s.socket, ReplyCode::ActionCompleted,
+                formatDirectoryListing(entries, true));
         }},
 
         { "STAT", [](ClientSession& s, const std::vector<std::string>& args) {

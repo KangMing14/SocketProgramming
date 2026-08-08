@@ -3,6 +3,10 @@
 #include <iostream>
 #include <utility>
 
+#ifndef RDT_DEBUG
+#define RDT_DEBUG 0
+#endif
+
 namespace hybridftp::client
 {
 
@@ -79,7 +83,9 @@ namespace hybridftp::client
       udpSocket = INVALID_SOCKET;
       return;
     }
+#if RDT_DEBUG
     std::cout << "[Sender] Initialized with existing PASV socket." << std::endl;
+#endif
   }
 
   RdtSender::RdtSender(SOCKET existingSocket, int timeoutMs)
@@ -156,12 +162,14 @@ namespace hybridftp::client
       {
         if (isAbortRequested())
           return false;
-        int err = WSAGetLastError();
+#if RDT_DEBUG
+        const int err = WSAGetLastError();
         if (err == WSAETIMEDOUT)
         {
           std::cerr << "[Sender] Timeout waiting for ACK " << expected_ack_num
                     << " — will retransmit." << std::endl;
         }
+#endif
         return false; // Real timeout, return false so sendChunk will retransmit
       }
 
@@ -183,8 +191,10 @@ namespace hybridftp::client
 
       // We got an ACK, but for the wrong packet (stale ACK from a previous
       // retransmit)
+#if RDT_DEBUG
       std::cerr << "[Sender] Stale ACK received (got " << validatedAck.ack_num
                 << " expected " << expected_ack_num << "), ignoring." << std::endl;
+#endif
     }
   }
 
@@ -230,14 +240,18 @@ namespace hybridftp::client
     {
       if (isAbortRequested())
         return false;
+#if RDT_DEBUG
       std::cout << "[Sender] Sending seq=" << seqNum << " (attempt "
                 << attempt + 1 << "/" << MAX_RETRIES << ")" << std::endl;
+#endif
 
       if (!sendRawPacket(packet)) continue;
 
       if (waitForAck(seqNum))
       {
+#if RDT_DEBUG
         std::cout << "[Sender] ACK received for seq=" << seqNum << std::endl;
+#endif
         return true; // Successfully delivered!
       }
       // If we got here, the ACK didn't come in time — loop and retransmit

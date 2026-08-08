@@ -22,6 +22,12 @@ public:
     virtual bool receiveNext(std::uint32_t& outSeqNum,
                              std::vector<char>& outData,
                              bool& outIsFinal) = 0;
+    // Allows a receiver to delay the final ACK until durable local commit.
+    // Returning false rejects the received sequence.
+    virtual bool confirmReceive(std::uint32_t seqNum, bool accepted) {
+        (void)seqNum;
+        return accepted;
+    }
     virtual bool flush() { return true; }
 };
 

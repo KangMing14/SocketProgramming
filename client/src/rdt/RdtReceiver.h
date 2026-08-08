@@ -23,9 +23,13 @@ private:
     std::vector<char> pendingDatagram;
     sockaddr_in pendingFrom{};
     std::function<bool()> abortPredicate;
+    bool finalAcknowledgementPending = false;
+    uint32_t pendingFinalSequence = 0;
 
-    // Helper to send an ACK back to whatever address just sent us data
-    void sendAck(uint32_t ack_num, sockaddr_in &clientAddr);
+    bool sendControlResponse(uint32_t sequence, std::uint8_t flags,
+                             const sockaddr_in& clientAddr);
+    bool sendAck(uint32_t sequence, const sockaddr_in& clientAddr);
+    bool sendNak(uint32_t sequence, const sockaddr_in& clientAddr);
     bool isAbortRequested() const;
     void applyDataTimeout();
 
@@ -40,10 +44,12 @@ public:
     // Destructor closes the socket
     ~RdtReceiver();
 
-    // High-level function: Waits for a valid packet, verifies checksum, and auto-sends an ACK.
+    // Waits for a valid packet and verifies its checksum. The final packet is
+    // acknowledged only after confirmReceive() reports a successful file commit.
     // Returns true on success, false on error/timeout.
     // Populates outData with the file chunk, outSeqNum with the sequence number, and outIsFinal if it's the last chunk.
     bool receiveNext(uint32_t& outSeqNum, std::vector<char>& outData, bool& outIsFinal) override;
+    bool confirmReceive(uint32_t seqNum, bool accepted) override;
     bool sendChunk(uint32_t seqNum, const char* data, size_t len,
                    bool isFinal = false) override;
     bool flush() override { return true; }

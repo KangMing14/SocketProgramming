@@ -26,7 +26,8 @@ public:
     SendResult sendFile(const std::filesystem::path& filePath,
                         TransferMode mode = TransferMode::Binary);
     bool receiveFile(const std::filesystem::path& destination,
-                     TransferMode mode = TransferMode::Binary);
+                     TransferMode mode = TransferMode::Binary,
+                     std::string* failureReason = nullptr);
 
 private:
     IRdtTransport& transport;

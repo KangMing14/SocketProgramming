@@ -1,6 +1,7 @@
 #include "Session.h"
 
 #include "ActiveModeClient.h"
+#include "ChunkedFileWriter.h"
 #include "DataChannelSession.h"
 #include "PassiveModeClient.h"
 #include "RdtReceiver.h"
@@ -113,7 +114,7 @@ bool readReply(SOCKET socket, ClientState& state, Reply& reply) {
         char buffer[512];
         const int received = recv(socket, buffer, sizeof(buffer), 0);
         if (received <= 0) return false;
-        state.replyBuffer.append(buffer, received);
+        state.replyBuffer.append(buffer, static_cast<std::size_t>(received));
     }
 
     return true;
@@ -127,6 +128,12 @@ bool printReply(SOCKET socket, ClientState& state, Reply& reply) {
     }
     
     return true;
+}
+
+void printStoredReply(const Reply& reply) {
+    for (const std::string& line : reply.lines)  {
+        std::cout << line << '\n';
+    }
 }
 
 std::vector<std::string> splitCommand(const std::string& command) {
@@ -373,11 +380,25 @@ bool retrieveFile(SOCKET controlSocket, ClientState& state,
     }
 
     const std::string remotePath = tokens[1];
-    const std::filesystem::path localPath = tokens.size() == 3
+    std::filesystem::path localPath = tokens.size() == 3
         ? std::filesystem::path(tokens[2])
         : std::filesystem::path(remotePath).filename();
+    if (tokens.size() == 3) {
+        std::error_code directoryError;
+        if (std::filesystem::is_directory(localPath, directoryError) &&
+            !directoryError) {
+            localPath /= std::filesystem::path(remotePath).filename();
+        }
+    }
     if (localPath.empty()) {
         std::cerr << "A local filename is required.\n";
+        return true;
+    }
+    std::string destinationFailure;
+    if (!hybridftp::client::ChunkedFileWriter::validateDestination(
+            localPath, destinationFailure)) {
+        std::cerr << "Cannot download to \"" << localPath.string()
+                  << "\": " << destinationFailure << '\n';
         return true;
     }
     if (!sendCommand(controlSocket, "RETR " + remotePath)) return false;
@@ -416,17 +437,39 @@ bool retrieveFile(SOCKET controlSocket, ClientState& state,
                     ready = receiver.signalClientReady(passiveAddress);
                 }
                 hybridftp::client::DataChannelSession channel(receiver, aborted);
+                std::string failureReason;
                 const bool transferOkay = ready && !aborted() &&
-                    channel.receiveFile(localPath, transferMode);
+                    channel.receiveFile(localPath, transferMode, &failureReason);
 
                 Reply completion;
-                const bool replyOkay = printReply(controlSocket, state, completion);
-                if (replyOkay && !aborted() &&
-                    (!transferOkay ||
-                     completion.code != ReplyCode::TransferComplete)) {
-                    std::cerr << "Download failed.\n";
+                const bool replyOkay = readReply(controlSocket, state, completion);
+                if (!replyOkay && !aborted()) {
+                    std::cerr << "Download failed for \"" << localPath.string()
+                              << "\": the final server reply was not received.\n";
                 } else if (replyOkay && !aborted() &&
-                           transferMode == TransferMode::Binary) {
+                           (!transferOkay ||
+                            completion.code != ReplyCode::TransferComplete)) {
+                    if (completion.code != ReplyCode::TransferComplete) {
+                        printStoredReply(completion);
+                    }
+                    std::cerr << "Download failed for \"" << localPath.string()
+                              << "\"";
+                    if (!failureReason.empty()) {
+                        std::cerr << ": " << failureReason;
+                    }
+                    if (completion.code == ReplyCode::TransferComplete) {
+                        std::cerr << (failureReason.empty() ? ": " : " ")
+                                  << "The server sent all data, but the local "
+                                     "file was not committed.";
+                    }
+                    std::cerr << '\n';
+                } else if (replyOkay && !aborted()) {
+                    printStoredReply(completion);
+                }
+
+                if (replyOkay && transferOkay && !aborted() &&
+                    completion.code == ReplyCode::TransferComplete &&
+                    transferMode == TransferMode::Binary) {
                     std::string serverHash;
                     if (extractHashField(completion.line, "SHA256", serverHash)) {
                         const std::string localHash =

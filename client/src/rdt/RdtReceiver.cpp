@@ -5,6 +5,10 @@
 #include <iostream>
 #include <utility>
 
+#ifndef RDT_DEBUG
+#define RDT_DEBUG 0
+#endif
+
 namespace hybridftp::client {
 
 namespace {
@@ -64,8 +68,10 @@ RdtReceiver::RdtReceiver(uint16_t listenPort) {
     return;
   }
 
+#if RDT_DEBUG
   std::cout << "[Receiver] Listening on port " << listenPort << "..."
             << std::endl;
+#endif
 }
 
 RdtReceiver::RdtReceiver(SOCKET existingSocket)
@@ -79,7 +85,9 @@ RdtReceiver::RdtReceiver(SOCKET existingSocket)
     udpSocket = INVALID_SOCKET;
     return;
   }
+#if RDT_DEBUG
   std::cout << "[Receiver] Initialized with existing PASV socket." << std::endl;
+#endif
 }
 
 void RdtReceiver::expectPeerIp(const in_addr& address) {
@@ -164,20 +172,51 @@ RdtReceiver::~RdtReceiver() {
   if (udpSocket != INVALID_SOCKET) closesocket(udpSocket);
 }
 
-void RdtReceiver::sendAck(uint32_t ackNumber, sockaddr_in& clientAddress) {
-  RdtHeader acknowledgement{};
-  acknowledgement.ack_num = ackNumber;
-  acknowledgement.flags = FLAG_ACK;
-  acknowledgement.window_size =
+bool RdtReceiver::sendControlResponse(uint32_t sequence, std::uint8_t flags,
+                                      const sockaddr_in& clientAddress) {
+  RdtHeader response{};
+  response.ack_num = sequence;
+  response.flags = flags;
+  response.window_size =
       static_cast<std::uint16_t>(RDT_RECEIVE_WINDOW);
 
   char bytes[HEADER_SIZE]{};
-  serializeHeader(acknowledgement, bytes);
-  acknowledgement.checksum = internetChecksum(
+  serializeHeader(response, bytes);
+  response.checksum = internetChecksum(
       reinterpret_cast<const uint8_t*>(bytes), HEADER_SIZE);
-  serializeHeader(acknowledgement, bytes);
-  sendto(udpSocket, bytes, static_cast<int>(HEADER_SIZE), 0,
-         reinterpret_cast<sockaddr*>(&clientAddress), sizeof(clientAddress));
+  serializeHeader(response, bytes);
+  return sendto(udpSocket, bytes, static_cast<int>(HEADER_SIZE), 0,
+                reinterpret_cast<const sockaddr*>(&clientAddress),
+                sizeof(clientAddress)) != SOCKET_ERROR;
+}
+
+bool RdtReceiver::sendAck(uint32_t sequence,
+                          const sockaddr_in& clientAddress) {
+  return sendControlResponse(sequence, FLAG_ACK, clientAddress);
+}
+
+bool RdtReceiver::sendNak(uint32_t sequence,
+                          const sockaddr_in& clientAddress) {
+  return sendControlResponse(sequence, FLAG_NAK, clientAddress);
+}
+
+bool RdtReceiver::confirmReceive(uint32_t sequence, bool accepted) {
+  if (!isValid() || !peerKnown) return false;
+
+  if (!accepted) {
+    if (finalAcknowledgementPending && pendingFinalSequence == sequence) {
+      finalAcknowledgementPending = false;
+    }
+    sendNak(sequence, peerAddr);
+    return false;
+  }
+
+  if (!finalAcknowledgementPending || pendingFinalSequence != sequence) {
+    return true;
+  }
+
+  finalAcknowledgementPending = false;
+  return sendAck(sequence, peerAddr);
 }
 
 bool RdtReceiver::receiveNext(uint32_t& outSequence,
@@ -242,7 +281,11 @@ bool RdtReceiver::receiveNext(uint32_t& outSequence,
     }
 
     if (header.seq_num < expectedSequence) {
-      sendAck(header.seq_num, senderAddress);
+      if (finalAcknowledgementPending &&
+          header.seq_num == pendingFinalSequence) {
+        continue;
+      }
+      if (!sendAck(header.seq_num, senderAddress)) return false;
       continue;
     }
     const std::uint64_t windowEnd =
@@ -256,8 +299,17 @@ bool RdtReceiver::receiveNext(uint32_t& outSequence,
       std::memcpy(payload.data(), receiveBuffer + HEADER_SIZE,
                   header.payload_len);
     }
-    sendAck(header.seq_num, senderAddress);
     const bool isFinal = (header.flags & FLAG_FIN) != 0;
+    if (isFinal) {
+      if (finalAcknowledgementPending &&
+          pendingFinalSequence != header.seq_num) {
+        continue;
+      }
+      finalAcknowledgementPending = true;
+      pendingFinalSequence = header.seq_num;
+    } else if (!sendAck(header.seq_num, senderAddress)) {
+      return false;
+    }
 
     if (header.seq_num > expectedSequence) {
       outOfOrderBuffer.emplace(

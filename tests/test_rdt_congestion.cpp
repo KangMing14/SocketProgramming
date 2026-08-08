@@ -237,12 +237,21 @@ public:
     }
 
     void sendAck(uint32_t acknowledgementNumber) {
+        sendResponse(acknowledgementNumber, FLAG_ACK);
+    }
+
+    void sendNak(uint32_t acknowledgementNumber) {
+        sendResponse(acknowledgementNumber, FLAG_NAK);
+    }
+
+private:
+    void sendResponse(uint32_t acknowledgementNumber, std::uint8_t flags) {
         require(senderAddressLength_ > 0,
-                "Cannot send an ACK before receiving a packet");
+                "Cannot send a response before receiving a packet");
 
         RdtHeader acknowledgement{};
         acknowledgement.ack_num = acknowledgementNumber;
-        acknowledgement.flags = FLAG_ACK;
+        acknowledgement.flags = flags;
         acknowledgement.window_size = 10;
 
         std::array<char, HEADER_SIZE> buffer{};
@@ -262,7 +271,6 @@ public:
         require(sent == static_cast<int>(buffer.size()), socketError("sendto"));
     }
 
-private:
     SOCKET socket_ = INVALID_SOCKET;
     uint16_t port_ = 0;
     sockaddr_in senderAddress_{};
@@ -528,6 +536,22 @@ void testRetransmissionFailurePropagation() {
     std::cout << "[PASS] retransmission failure propagation\n";
 }
 
+void testReceiverRejectionPropagates() {
+    MockReceiver receiver;
+    RdtSender sender("127.0.0.1", receiver.port(), 500);
+
+    SenderTask task([&]() {
+        return sender.sendChunk(0, "final", 5, true) && sender.flush();
+    });
+
+    const RdtHeader packet = receiver.receivePacket();
+    receiver.sendNak(packet.seq_num);
+
+    require(!task.get(),
+            "A receiver NAK must fail the sender instead of completing");
+    std::cout << "[PASS] receiver rejection propagates to sender\n";
+}
+
 void testInitialTimestampExcludesPreSendDelay() {
     MockReceiver receiver;
     RdtSender sender("127.0.0.1", receiver.port(), 500);
@@ -575,6 +599,7 @@ int main() {
         testExponentialBackoff();
         testKarnsAlgorithm();
         testRetransmissionFailurePropagation();
+        testReceiverRejectionPropagates();
         testInitialTimestampExcludesPreSendDelay();
 
         std::cout << "\nAll RDT congestion tests passed.\n";

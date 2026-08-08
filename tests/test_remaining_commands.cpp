@@ -10,6 +10,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
+#include <algorithm>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
@@ -43,34 +44,54 @@ public:
 struct Reply {
     int code = 0;
     std::string line;
+    std::vector<std::string> lines;
 };
 
 class ReplyReader {
 public:
     Reply read(SOCKET socket) {
+        Reply reply;
+        reply.line = readLine(socket);
+        require(hasReplyCode(reply.line),
+                "Malformed control reply: " + reply.line);
+        reply.code = std::stoi(reply.line.substr(0, 3));
+        reply.lines.push_back(reply.line);
+
+        if (reply.line.size() <= 3 || reply.line[3] != '-') return reply;
+
+        const std::string terminator = std::to_string(reply.code) + " ";
+        while (true) {
+            reply.line = readLine(socket);
+            reply.lines.push_back(reply.line);
+            if (reply.line.rfind(terminator, 0) == 0) return reply;
+        }
+    }
+
+private:
+    static bool hasReplyCode(const std::string& line) {
+        return line.size() >= 3 &&
+               std::isdigit(static_cast<unsigned char>(line[0])) &&
+               std::isdigit(static_cast<unsigned char>(line[1])) &&
+               std::isdigit(static_cast<unsigned char>(line[2]));
+    }
+
+    std::string readLine(SOCKET socket) {
         while (true) {
             const std::size_t newline = buffered_.find('\n');
             if (newline != std::string::npos) {
                 std::string line = buffered_.substr(0, newline);
                 buffered_.erase(0, newline + 1);
                 if (!line.empty() && line.back() == '\r') line.pop_back();
-                if (line.size() < 3 ||
-                    !std::isdigit(static_cast<unsigned char>(line[0])) ||
-                    !std::isdigit(static_cast<unsigned char>(line[1])) ||
-                    !std::isdigit(static_cast<unsigned char>(line[2]))) {
-                    continue;
-                }
-                return {std::stoi(line.substr(0, 3)), std::move(line)};
+                return line;
             }
 
             char bytes[512];
             const int received = recv(socket, bytes, sizeof(bytes), 0);
             require(received > 0, "Control connection closed unexpectedly");
-            buffered_.append(bytes, received);
+            buffered_.append(bytes, static_cast<std::size_t>(received));
         }
     }
 
-private:
     std::string buffered_;
 };
 
@@ -84,6 +105,28 @@ void sendCommand(SOCKET socket, const std::string& command) {
         require(sent > 0, "Could not send control command");
         sentTotal += static_cast<std::size_t>(sent);
     }
+}
+
+bool replyContains(const Reply& reply, const std::string& text) {
+    return std::any_of(reply.lines.begin(), reply.lines.end(),
+                       [&](const std::string& line) {
+                           return line.find(text) != std::string::npos;
+                       });
+}
+
+Reply readListing(SOCKET control, ReplyReader& replies,
+                  const std::string& command) {
+    sendCommand(control, command);
+    Reply listing = replies.read(control);
+    require(listing.code == ReplyCode::ActionCompleted,
+            command + " did not return 250");
+
+    sendCommand(control, "NOOP");
+    const Reply noop = replies.read(control);
+    require(noop.code == ReplyCode::ActionCompleted &&
+                replyContains(noop, "NOOP OK"),
+            command + " left the control reply stream out of sync");
+    return listing;
 }
 
 std::pair<SOCKET, SOCKET> createControlPair() {
@@ -232,7 +275,11 @@ int main() {
         std::error_code ignored;
         fs::remove_all(g_pathResolver.root(), ignored);
         fs::create_directories(g_pathResolver.root() / "subdir");
+        fs::create_directories(g_pathResolver.root() / "multiple");
+        fs::create_directories(g_pathResolver.root() / "empty");
         writeText(g_pathResolver.root() / "subdir" / "inside.txt", "listed");
+        writeText(g_pathResolver.root() / "multiple" / "first.txt", "first");
+        writeText(g_pathResolver.root() / "multiple" / "second.bin", "second");
 
         firstSource = fs::absolute("remaining_first_source.bin");
         secondSource = fs::absolute("remaining_second_source.bin");
@@ -257,17 +304,48 @@ int main() {
                     ReplyCode::CommandNotImplementedForParameter,
                 "MODE C was not rejected with 504");
 
-        sendCommand(control, "LIST subdir");
-        Reply listing = replies.read(control);
-        require(listing.code == ReplyCode::ActionCompleted &&
-                    listing.line.find("inside.txt") != std::string::npos,
-                "LIST ignored its path argument");
-        sendCommand(control, "NLST subdir");
-        Reply names = replies.read(control);
-        require(names.code == ReplyCode::ActionCompleted &&
-                    names.line.find("inside.txt") != std::string::npos &&
-                    names.line.find("rw") == std::string::npos,
-                "NLST path listing was not name-only");
+        const Reply emptyList = readListing(control, replies, "LIST empty");
+        require(emptyList.lines.size() == 1 && emptyList.line == "250 ",
+                "LIST did not represent an empty directory cleanly");
+        const Reply emptyNames = readListing(control, replies, "NLST empty");
+        require(emptyNames.lines.size() == 1 && emptyNames.line == "250 ",
+                "NLST did not represent an empty directory cleanly");
+
+        const Reply listing = readListing(control, replies, "LIST subdir");
+        require(listing.lines.size() == 1 &&
+                    replyContains(listing, "inside.txt") &&
+                    replyContains(listing, "rw"),
+                "LIST did not return one detailed file entry");
+        const Reply names = readListing(control, replies, "NLST subdir");
+        require(names.lines.size() == 1 &&
+                    replyContains(names, "inside.txt") &&
+                    !replyContains(names, "rw"),
+                "NLST did not return one name-only file entry");
+
+        const Reply multipleList = readListing(control, replies, "LIST multiple");
+        require(multipleList.lines.size() == 2 &&
+                    replyContains(multipleList, "first.txt") &&
+                    replyContains(multipleList, "second.bin"),
+                "LIST did not frame all entries in a non-empty directory");
+        const Reply multipleNames = readListing(control, replies, "NLST multiple");
+        require(multipleNames.lines.size() == 2 &&
+                    replyContains(multipleNames, "first.txt") &&
+                    replyContains(multipleNames, "second.bin") &&
+                    !replyContains(multipleNames, "rw"),
+                "NLST did not frame all name-only entries");
+
+        const Reply fileList = readListing(
+            control, replies, "LIST subdir/inside.txt");
+        require(fileList.lines.size() == 1 &&
+                    replyContains(fileList, "inside.txt") &&
+                    replyContains(fileList, "rw"),
+                "LIST did not support a regular-file target");
+        const Reply fileNames = readListing(
+            control, replies, "NLST subdir/inside.txt");
+        require(fileNames.lines.size() == 1 &&
+                    replyContains(fileNames, "inside.txt") &&
+                    !replyContains(fileNames, "rw"),
+                "NLST did not support a regular-file target");
 
         const Reply firstUnique = activeUpload(
             control, replies, "STOU", firstSource);
