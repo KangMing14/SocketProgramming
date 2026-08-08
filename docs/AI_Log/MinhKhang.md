@@ -1,4 +1,4 @@
-﻿# GenAI Usage & Code Refinement Log — Member C (Data & Filesystem Lead)
+﻿# GenAI Usage & Code Refinement Log — Do Minh Khang
 
 This log documents instances where I identified a gap, bug, or risk in the AI-assisted output or in our project setup, and directed the AI to produce a fix or enhancement. Verification/testing evidence for each fix is recorded separately in the Application Demo Evidence section.
 
