@@ -60,6 +60,54 @@ bool openActiveListenPort(SOCKET& outDataSock, unsigned short& outPort) {
     return true;
 }
 
+bool parsePortCommand(const std::string& argument, sockaddr_in& outAddress) {
+    int h1, h2, h3, h4, p1, p2;
+    int charsConsumed = 0;
+    const int fieldsParsed = sscanf_s(
+        argument.c_str(), "%d,%d,%d,%d,%d,%d%n",
+        &h1, &h2, &h3, &h4, &p1, &p2, &charsConsumed);
+    if (fieldsParsed != 6 ||
+        charsConsumed != static_cast<int>(argument.size())) {
+        return false;
+    }
+
+    const auto inByteRange = [](int value) {
+        return value >= 0 && value <= 255;
+    };
+    if (!inByteRange(h1) || !inByteRange(h2) || !inByteRange(h3) ||
+        !inByteRange(h4) || !inByteRange(p1) || !inByteRange(p2) ||
+        (p1 == 0 && p2 == 0)) {
+        return false;
+    }
+
+    char ipAddress[16];
+    sprintf_s(ipAddress, "%d.%d.%d.%d", h1, h2, h3, h4);
+    outAddress = {};
+    outAddress.sin_family = AF_INET;
+    outAddress.sin_port = htons(
+        static_cast<unsigned short>(p1 * 256 + p2));
+    return inet_pton(AF_INET, ipAddress, &outAddress.sin_addr) == 1;
+}
+
+bool openActiveListenPort(const sockaddr_in& localAddress,
+                          SOCKET& outDataSock) {
+    outDataSock = INVALID_SOCKET;
+    if (localAddress.sin_family != AF_INET || localAddress.sin_port == 0) {
+        return false;
+    }
+
+    outDataSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (outDataSock == INVALID_SOCKET) return false;
+    if (bind(outDataSock,
+             reinterpret_cast<const sockaddr*>(&localAddress),
+             sizeof(localAddress)) == SOCKET_ERROR) {
+        closesocket(outDataSock);
+        outDataSock = INVALID_SOCKET;
+        return false;
+    }
+    return true;
+}
+
 std::string formatPortCommand(uint32_t ipv4Address, unsigned short port) {
     unsigned char h1 = (ipv4Address >> 24) & 0xFF;
     unsigned char h2 = (ipv4Address >> 16) & 0xFF;
