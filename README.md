@@ -16,8 +16,10 @@ Run `build/ftp_server.exe`, then `build/ftp_client.exe`. The client connects to
 
 ## Data commands
 
-- `PORT` binds a one-transfer client UDP socket and sends the generated FTP
-  address to the server.
+- `PORT [h1,h2,h3,h4,p1,p2]` binds a one-transfer client UDP socket. With no
+  argument, the client selects an endpoint and generates the FTP address. With
+  an argument, it validates and binds that exact local endpoint before sending
+  it to the server.
 - `PASV` requests a one-transfer server UDP socket.
 - `STOR <local-path> [remote-path]` uploads a file. The remote name defaults to
   the local filename.

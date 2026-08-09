@@ -1,3 +1,4 @@
+#include "../client/src/datachannel/ActiveModeClient.h"
 #include "../client/src/datachannel/DataChannelSession.h"
 #include "../client/src/rdt/RdtReceiver.h"
 #include "../client/src/rdt/RdtSender.h"
@@ -215,6 +216,46 @@ void testClientSenderRejectsWrongAckEndpoint() {
     std::cout << "[PASS] client sender rejects ACK from wrong UDP port\n";
 }
 
+void testManualPortArgumentParsingAndBinding() {
+    SOCKET temporarySocket = INVALID_SOCKET;
+    unsigned short availablePort = 0;
+    assert(hybridftp::client::openActiveListenPort(
+        temporarySocket, availablePort));
+    closesocket(temporarySocket);
+
+    in_addr loopback{};
+    assert(inet_pton(AF_INET, "127.0.0.1", &loopback) == 1);
+    const std::string argument = hybridftp::client::formatPortCommand(
+        ntohl(loopback.s_addr), availablePort);
+
+    sockaddr_in requestedAddress{};
+    assert(hybridftp::client::parsePortCommand(
+        argument, requestedAddress));
+    assert(requestedAddress.sin_addr.s_addr == loopback.s_addr);
+    assert(ntohs(requestedAddress.sin_port) == availablePort);
+
+    SOCKET manuallyBoundSocket = INVALID_SOCKET;
+    assert(hybridftp::client::openActiveListenPort(
+        requestedAddress, manuallyBoundSocket));
+    sockaddr_in boundAddress{};
+    int boundLength = sizeof(boundAddress);
+    assert(getsockname(
+        manuallyBoundSocket, reinterpret_cast<sockaddr*>(&boundAddress),
+        &boundLength) != SOCKET_ERROR);
+    assert(boundAddress.sin_addr.s_addr == loopback.s_addr);
+    assert(ntohs(boundAddress.sin_port) == availablePort);
+    closesocket(manuallyBoundSocket);
+
+    for (const std::string invalid : {
+             "127,0,0,1,1", "127,0,0,1,1,2,3",
+             "127,0,0,1,0,0", "127,0,0,999,1,2",
+             "127,0,0,1,1,2junk"}) {
+        sockaddr_in rejected{};
+        assert(!hybridftp::client::parsePortCommand(invalid, rejected));
+    }
+    std::cout << "[PASS] manual PORT argument binds the requested endpoint\n";
+}
+
 }
 
 int main() {
@@ -225,6 +266,7 @@ int main() {
     testAbortBeforeSend();
     testEarlyDataCompletesPassiveHandshake();
     testClientSenderRejectsWrongAckEndpoint();
+    testManualPortArgumentParsingAndBinding();
 
     for (const auto& name : {
              "dc_client_source.bin", "dc_client_result.bin",

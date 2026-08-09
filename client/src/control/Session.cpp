@@ -184,30 +184,53 @@ bool extractHashField(const std::string& replyLine,
 
 bool enterActiveMode(SOCKET controlSocket, ClientState& state,
                      const std::vector<std::string>& tokens) {
-    if (tokens.size() != 1) {
-        std::cerr << "Usage: PORT\n";
+    if (tokens.size() < 1 || tokens.size() > 2) {
+        std::cerr << "Usage: PORT [h1,h2,h3,h4,p1,p2]\n";
         return true;
     }
     closeDataState(state);
-
-    SOCKET dataSocket = INVALID_SOCKET;
-    unsigned short dataPort = 0;
-    if (!hybridftp::client::openActiveListenPort(dataSocket, dataPort)) {
-        std::cerr << "Could not bind an Active-mode UDP socket.\n";
-        return true;
-    }
 
     char serverIp[INET_ADDRSTRLEN]{};
     inet_ntop(AF_INET, &state.serverAddress.sin_addr, serverIp, sizeof(serverIp));
     std::uint32_t localIp = 0;
     if (!hybridftp::client::getLocalIPv4ForServer(serverIp, localIp)) {
-        closesocket(dataSocket);
         std::cerr << "Could not determine the local IPv4 address.\n";
         return true;
     }
 
-    const std::string portArgument =
-        hybridftp::client::formatPortCommand(localIp, dataPort);
+    SOCKET dataSocket = INVALID_SOCKET;
+    std::string portArgument;
+    if (tokens.size() == 2) {
+        sockaddr_in requestedAddress{};
+        if (!hybridftp::client::parsePortCommand(
+                tokens[1], requestedAddress)) {
+            std::cerr << "Invalid PORT argument. Usage: "
+                         "PORT h1,h2,h3,h4,p1,p2\n";
+            return true;
+        }
+        if (ntohl(requestedAddress.sin_addr.s_addr) != localIp) {
+            std::cerr << "PORT address must match the local control "
+                         "connection address.\n";
+            return true;
+        }
+        if (!hybridftp::client::openActiveListenPort(
+                requestedAddress, dataSocket)) {
+            std::cerr << "Could not bind the requested Active-mode UDP "
+                         "endpoint.\n";
+            return true;
+        }
+        portArgument = tokens[1];
+    } else {
+        unsigned short dataPort = 0;
+        if (!hybridftp::client::openActiveListenPort(
+                dataSocket, dataPort)) {
+            std::cerr << "Could not bind an Active-mode UDP socket.\n";
+            return true;
+        }
+        portArgument =
+            hybridftp::client::formatPortCommand(localIp, dataPort);
+    }
+
     if (!sendCommand(controlSocket, "PORT " + portArgument)) {
         closesocket(dataSocket);
         return false;
