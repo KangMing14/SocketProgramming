@@ -1,0 +1,181 @@
+#include "DirectoryService.h"
+
+#include "ReplyCodes.h"
+
+DirectoryService::DirectoryService(const PathResolver& resolver) : resolver(resolver) {}
+
+DirectoryService::Result DirectoryService::printWorkingDir(const std::filesystem::path& currentDir) const {
+	auto relative = fs::relative(currentDir, resolver.root());
+	std::string display = "/" + relative.generic_string();
+	if (display == "/.") display = "/";
+
+	return { true, ReplyCode::PathnameCreated, "\"" + display + "\" is the current directory." };
+}
+
+DirectoryService::Result DirectoryService::changeDir(fs::path& currentDir, const std::string& target) const {
+	fs::path resolved;
+	if (!resolver.resolve(currentDir, target, resolved))
+		return { false, ReplyCode::ActionNotTaken, "Path outside server root." };
+	if(!fs::exists(resolved) || !fs::is_directory(resolved))
+		return { false, ReplyCode::ActionNotTaken, "Not a directory." };
+
+	currentDir = resolved;
+	return { true, ReplyCode::ActionCompleted, "Directory changed to " + resolved.filename().string() };
+}
+
+DirectoryService::Result DirectoryService::changeToParent(fs::path& currentDir) const {
+	fs::path resolved;
+	if (!resolver.resolve(currentDir, "..", resolved))
+		return { false, ReplyCode::ActionNotTaken, "Already at server root." };
+
+	currentDir = resolved;
+	return { true, ReplyCode::ActionCompleted, "Directory changed to " + resolved.filename().string() };
+}
+
+DirectoryService::Result DirectoryService::makeDir(const fs::path& currentDir, const std::string& name) const {
+	fs::path resolved;
+	if(!resolver.resolve(currentDir, name, resolved))
+		return { false, ReplyCode::ActionNotTaken, "Path outside server root." };
+	if(fs::exists(resolved))
+		return { false, ReplyCode::ActionNotTaken, "Already exists." };
+
+	std::error_code ec;
+	if(!fs::create_directories(resolved, ec) || ec)
+		return { false, ReplyCode::ActionNotTaken, "Could not create directory." };
+
+	return { true, ReplyCode::PathnameCreated, "\"" + resolved.filename().string() + "\" created" };
+}
+
+DirectoryService::Result DirectoryService::removeDir(const fs::path& currentDir, const std::string& name) const {
+	fs::path resolved;
+	if (!resolver.resolve(currentDir, name, resolved))
+		return { false, ReplyCode::ActionNotTaken, "Path outside server root." };
+	if (!fs::exists(resolved) || !fs::is_directory(resolved))
+		return { false, ReplyCode::ActionNotTaken, "Not a directory" };
+	if(resolved == resolver.root())
+		return { false, ReplyCode::ActionNotTaken, "Cannot remove server root" };
+
+	std::error_code ec;
+	if (!fs::remove(resolved, ec) || ec)
+		return { false, ReplyCode::ActionNotTaken, "Directory not empty or in use" };
+
+	return { true, ReplyCode::ActionCompleted, "Directory removed" };
+}
+
+bool DirectoryService::listDir(const fs::path& currentDir, const std::string& target,
+                               std::vector<DirEntryInfo>& outEntries) const {
+	outEntries.clear();
+	std::error_code ec;
+	fs::path resolved;
+	if (!resolver.resolve(currentDir, target, resolved)) return false;
+	if (!fs::exists(resolved, ec) || ec) return false;
+
+	auto appendEntry = [&](const fs::path& path) {
+		DirEntryInfo info;
+		info.formatPermissions = getFormatPermissions(path);
+		info.name = path.filename().string();
+		info.isDirectory = fs::is_directory(path, ec);
+		if (ec) return false;
+		info.sizeBytes = info.isDirectory ? 0 : fs::file_size(path, ec);
+		if (ec) return false;
+		outEntries.push_back(std::move(info));
+		return true;
+	};
+
+	if (!fs::is_directory(resolved, ec)) {
+		return !ec && appendEntry(resolved);
+	}
+
+	for (const auto& entry : fs::directory_iterator(resolved, ec)) {
+		if (!appendEntry(entry.path())) return false;
+	}
+	return !ec;
+}
+
+bool DirectoryService::getMetadata(const fs::path& currentDir, const std::string& target, PathMetadata& out) const {
+	fs::path resolved;
+	if (!resolver.resolve(currentDir, target, resolved)) return false;
+
+	std::error_code ec;
+	out.exists = fs::exists(resolved, ec);
+	if (!out.exists || ec) return false;
+
+	out.isDirectory = fs::is_directory(resolved, ec);
+	out.sizeBytes = out.isDirectory ? 0 : fs::file_size(resolved, ec);
+	out.lastModified = fs::last_write_time(resolved, ec);
+
+	return !ec;
+}
+
+DirectoryService::Result DirectoryService::deleteFile(const fs::path& currentDir, const std::string& name) const {
+	PathMetadata meta;
+	if (!getMetadata(currentDir, name, meta))
+		return { false, ReplyCode::ActionNotTaken, "File not found" };
+	if (meta.isDirectory)
+		return { false, ReplyCode::ActionNotTaken, "Cannot DELE a directory; use RMD" };
+
+	std::filesystem::path resolved;
+	resolver.resolve(currentDir, name, resolved);
+
+	std::error_code ec;
+	if (!std::filesystem::remove(resolved, ec) || ec)
+		return { false, ReplyCode::ActionNotTaken, "Could not delete file" };
+
+	return { true, ReplyCode::ActionCompleted, "File deleted" };
+}
+
+DirectoryService::Result DirectoryService::renameFrom(const fs::path& currentDir, const std::string& oldName, fs::path& outPendingRenameSource) const {
+	PathMetadata meta;
+	if (!getMetadata(currentDir, oldName, meta))
+		return { false, ReplyCode::ActionNotTaken, "File not found" };
+
+	resolver.resolve(currentDir, oldName, outPendingRenameSource);
+	return { true, ReplyCode::PendingRNTO, "Requested file action pending further information (RNTO)" };
+}
+
+DirectoryService::Result DirectoryService::renameTo(const fs::path& currentDir, const fs::path& pendingRenameSource, const std::string& newName) const {
+	std::filesystem::path resolvedDest;
+	if (!resolver.resolve(currentDir, newName, resolvedDest))
+		return { false, ReplyCode::ActionNotTaken, "Destination path outside server root" };
+
+	std::error_code ec;
+	std::filesystem::rename(pendingRenameSource, resolvedDest, ec);
+	if (ec)
+		return { false, ReplyCode::ActionNotTaken, "Rename failed." };
+
+	return { true, ReplyCode::ActionCompleted, "Rename successful" };
+}
+
+std::string DirectoryService::getFormatPermissions(const fs::path& path) const {
+	std::error_code ec;
+	fs::file_status status = fs::status(path, ec);
+	if (ec) return "d---------";
+
+	char type_char = '-';
+	switch (status.type()) {
+	case fs::file_type::directory:		type_char = 'd'; break;
+		case fs::file_type::regular:    type_char = '-'; break;
+		case fs::file_type::symlink:    type_char = 'l'; break;
+		case fs::file_type::block:      type_char = 'b'; break;
+		case fs::file_type::character:  type_char = 'c'; break;
+		case fs::file_type::fifo:       type_char = 'p'; break;
+		case fs::file_type::socket:     type_char = 's'; break;
+		default:                        type_char = '-'; break;
+	}
+
+	std::string perms_str = "---------";
+	fs::perms p = status.permissions();
+	if ((p & fs::perms::owner_read) != fs::perms::none)	 perms_str[0] = 'r';
+	if ((p & fs::perms::owner_write) != fs::perms::none) perms_str[1] = 'w';
+	if ((p & fs::perms::owner_exec) != fs::perms::none)  perms_str[2] = 'x';
+
+	if ((p & fs::perms::group_read) != fs::perms::none)  perms_str[3] = 'r';
+	if ((p & fs::perms::group_write) != fs::perms::none) perms_str[4] = 'w';
+	if ((p & fs::perms::group_exec) != fs::perms::none)  perms_str[5] = 'x';
+
+	if ((p & fs::perms::others_read) != fs::perms::none)  perms_str[6] = 'r';
+	if ((p & fs::perms::others_write) != fs::perms::none) perms_str[7] = 'w';
+	if ((p & fs::perms::others_exec) != fs::perms::none)  perms_str[8] = 'x';
+
+	return type_char + perms_str;
+}
