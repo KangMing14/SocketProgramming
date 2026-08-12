@@ -94,6 +94,11 @@ target_link_libraries(ftp_server PRIVATE ftp_server_core)
 add_executable(ftp_client client/src/main.cpp)
 target_link_libraries(ftp_client PRIVATE ftp_client_core)
 
+add_executable(http_client project2/http_client.cpp)
+if(WIN32)
+    target_link_libraries(http_client PRIVATE ws2_32)
+endif()
+
 enable_testing()
 
 function(add_server_test target source)

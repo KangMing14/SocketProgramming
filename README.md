@@ -11,8 +11,18 @@ cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
 
-Run `build/ftp_server.exe`, then `build/ftp_client.exe`. The client connects to
-`127.0.0.1:4567`.
+Run `build/ftp_server.exe`, then `build/ftp_client.exe`. With no arguments, the
+client connects to `127.0.0.1:4567`.
+
+To run the client on a second PC, pass the server's LAN IPv4 address and,
+optionally, the control port:
+
+```powershell
+./build/ftp_client.exe 192.168.1.20 4567
+```
+
+The server listens on all local IPv4 interfaces. Allow the executables through
+Windows Firewall on the private network before testing across two PCs.
 
 ## Data commands
 
@@ -40,3 +50,18 @@ ephemeral UDP socket that receives the file. The client learns that source
 endpoint, acknowledges it, and sends `DATA` packets back through its advertised
 socket. The final data packet carries `FIN`; empty files use a zero-length
 `DATA|FIN` packet.
+
+## Project 2 HTTP client
+
+`http_client` is a raw Winsock HTTP/1.1 client for the Wireshark assignment. It
+resolves `www.google.com`, opens a TCP connection to port 80, sends a hand-written
+`GET /` request, and prints the response until the server closes the connection.
+
+```powershell
+cmake --build build --target http_client
+./build/http_client.exe
+```
+
+Start Wireshark before running the program. To retain both the DNS lookup and
+the HTTP conversation, capture without a filter or use `port 53 or tcp port 80`;
+then use `dns || tcp.port == 80` as a display filter.
